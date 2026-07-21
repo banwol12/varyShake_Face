@@ -3,5 +3,6 @@ dist/
 .DS_Store
 __MACOSX/
 *.part
+*.mp4
 varyshake/public/youtube_temp.mp4
 varyshake/public/youtube_temp.mp4.part

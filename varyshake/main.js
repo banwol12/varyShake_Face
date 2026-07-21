@@ -394,6 +394,43 @@ function highlightCatalogMember(label) {
   }
 }
 
+// K-NN (Top-K) Mean Distance Classifier for robust outlier rejection
+function findKnnMatch(queryDescriptor, topK = 3) {
+  if (!labeledDescriptors || labeledDescriptors.length === 0) {
+    return { label: 'unknown', distance: 1.0 };
+  }
+
+  let bestLabel = 'unknown';
+  let minKnnDist = Infinity;
+
+  for (let ld of labeledDescriptors) {
+    const label = ld.label;
+    const distances = [];
+
+    for (let desc of ld.descriptors) {
+      const dist = faceapi.euclideanDistance(queryDescriptor, desc);
+      distances.push(dist);
+    }
+
+    distances.sort((a, b) => a - b);
+    const k = Math.min(topK, distances.length);
+    if (k === 0) continue;
+
+    const topKDistances = distances.slice(0, k);
+    const meanDist = topKDistances.reduce((a, b) => a + b, 0) / k;
+
+    // Apply per-member strictness multiplier if defined
+    const memberThreshold = MEMBER_THRESHOLDS[label] || matchThreshold;
+    
+    if (meanDist < minKnnDist) {
+      minKnnDist = meanDist;
+      bestLabel = label;
+    }
+  }
+
+  return { label: bestLabel, distance: minKnnDist };
+}
+
 // 5. Temporal Webcam Voting & Tracking algorithm
 function trackAndSmoothDetections(detections) {
   const now = Date.now();
@@ -423,12 +460,13 @@ function trackAndSmoothDetections(detections) {
       }
     });
 
-    const bestMatch = faceMatcherNoLimit.findBestMatch(det.descriptor);
+    // Use Top-3 K-NN Mean Distance matching for maximum accuracy
+    const bestMatch = findKnnMatch(det.descriptor, 3);
     const rawLabel = bestMatch.label;
     const distance = bestMatch.distance;
 
-    // Directly use the user-controlled Recognition Sensitivity slider value as the matching threshold
-    const resolvedLabel = (rawLabel !== 'unknown' && distance < matchThreshold) ? rawLabel : 'unknown';
+    const targetThreshold = (rawLabel !== 'unknown' && MEMBER_THRESHOLDS[rawLabel]) ? MEMBER_THRESHOLDS[rawLabel] : matchThreshold;
+    const resolvedLabel = (rawLabel !== 'unknown' && distance < targetThreshold) ? rawLabel : 'unknown';
 
     if (bestTrack) {
       bestTrack.lastBox = box;

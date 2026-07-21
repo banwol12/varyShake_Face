@@ -15,6 +15,12 @@ except ImportError:
     print("  pip3 install face-recognition")
     exit(1)
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 # Bypass SSL certificates verification (common on macOS)
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -114,6 +120,17 @@ def download_and_verify_candidates(member, anchor_encs, max_additions=15):
                     
                 # Analyze the face in downloaded image
                 try:
+                    # Blur check if OpenCV is available
+                    if HAS_CV2:
+                        img_cv2 = cv2.imread(temp_path)
+                        if img_cv2 is not None:
+                            gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+                            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+                            if blur_score < 90.0:  # Threshold for image sharpness
+                                print(f"  ✗ Discarded: Image too blurry (blur score: {blur_score:.1f} < 90.0).")
+                                os.remove(temp_path)
+                                continue
+
                     candidate_image = face_recognition.load_image_file(temp_path)
                     candidate_encs = face_recognition.face_encodings(candidate_image)
                     
@@ -172,9 +189,11 @@ def main():
         time.sleep(5.0)
         
     print("\nBiometric database expansion completed!")
-    # Regenerate the index JSON
-    import sys
-    os.system(f'"{sys.executable}" generate_db_json.py')
+    try:
+        import build_descriptors
+        build_descriptors.build()
+    except Exception as e:
+        print(f"Error building descriptors: {e}")
 
 if __name__ == "__main__":
     main()

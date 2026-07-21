@@ -110,18 +110,25 @@ app.get('/api/youtube-prepare', (req, res) => {
     return res.status(400).json({ error: 'YouTube URL is required.' });
   }
 
-  // Preprocess URL: Strip playlist parameters (&list=...) to prevent ytdlp format lockups
+  // Preprocess URL: Support watch, shorts, mobile, youtu.be, embed, etc.
   let cleanUrl = url;
-  const watchMatch = url.match(/(https:\/\/www\.youtube\.com\/watch\?v=[^&\s]+)/);
-  const shareMatch = url.match(/(https:\/\/youtu\.be\/[^&\s?]+)/);
-  if (watchMatch) {
-    cleanUrl = watchMatch[1];
-  } else if (shareMatch) {
-    cleanUrl = shareMatch[1];
+  const videoIdMatch = url.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  if (videoIdMatch && videoIdMatch[1]) {
+    cleanUrl = `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
   }
 
   console.log(`[YouTube Prepare] Request to download: ${cleanUrl} (Original: ${url})`);
   const tempFile = path.join(__dirname, 'public', 'youtube_temp.mp4');
+
+  // Clean up any stale temp or part files from previous failed downloads
+  try {
+    const publicDir = path.join(__dirname, 'public');
+    fs.readdirSync(publicDir).forEach(file => {
+      if (file.startsWith('youtube_temp.mp4')) {
+        try { fs.unlinkSync(path.join(publicDir, file)); } catch (e) {}
+      }
+    });
+  } catch (e) {}
 
   // If already downloading the same URL, join the active queue
   if (activeDownloads.has(cleanUrl)) {
@@ -134,18 +141,26 @@ app.get('/api/youtube-prepare', (req, res) => {
   const waiters = [{ res }];
   activeDownloads.set(cleanUrl, waiters);
 
-  // Choose 1080p Video Only (ext=mp4) format. This fetches true 1080p H264 video without needing FFmpeg to merge audio.
+  let stderrBuffer = '';
+
+  // Flexible format selection: works with or without ffmpeg
   const ytdlp = spawn('yt-dlp', [
-    '-f', 'bestvideo[height<=1080][ext=mp4]/best[height<=1080][ext=mp4]/best',
-    '-o', tempFile + '.part', // download to a part file first to avoid corruption
+    '-f', 'best[ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best',
+    '-o', tempFile,
+    '--no-part',           // Download directly to target file without creating .part extension
+    '--no-continue',       // Force fresh download, do not attempt range resume
+    '--force-overwrites',  // Overwrite existing file
     '--no-warnings',
-    '--no-playlist',     // Don't download playlist, only the single video
+    '--no-playlist',       // Don't download playlist, only the single video
     cleanUrl
   ]);
 
   ytdlp.stderr.on('data', (data) => {
     const msg = data.toString().trim();
-    if (msg) console.log(`[YouTube Download] ${msg}`);
+    if (msg) {
+      console.log(`[YouTube Download] ${msg}`);
+      stderrBuffer += msg + '\n';
+    }
   });
 
   ytdlp.on('error', (err) => {
@@ -154,7 +169,7 @@ app.get('/api/youtube-prepare', (req, res) => {
     activeDownloads.delete(cleanUrl);
     activeWaiters.forEach(w => {
       if (!w.res.headersSent) {
-        w.res.status(500).json({ error: `Failed to download video: ${err.message}` });
+        w.res.status(500).json({ error: `Failed to launch yt-dlp: ${err.message}` });
       }
     });
   });
@@ -164,20 +179,22 @@ app.get('/api/youtube-prepare', (req, res) => {
     activeDownloads.delete(cleanUrl);
 
     if (code !== 0) {
-      console.error(`[YouTube Prepare] yt-dlp exited with code ${code}`);
+      console.error(`[YouTube Prepare] yt-dlp exited with code ${code}. Stderr: ${stderrBuffer}`);
+      let errorMsg = `yt-dlp download failed (code ${code})`;
+      if (stderrBuffer.includes('ERROR:')) {
+        const errorLines = stderrBuffer.split('\n').filter(l => l.includes('ERROR:'));
+        if (errorLines.length > 0) {
+          errorMsg = errorLines[0].replace(/^ERROR:\s*/, '');
+        }
+      }
       activeWaiters.forEach(w => {
         if (!w.res.headersSent) {
-          w.res.status(500).json({ error: `yt-dlp download failed with exit code ${code}` });
+          w.res.status(500).json({ error: errorMsg });
         }
       });
     } else {
       try {
-        const partFile = tempFile + '.part';
-        if (fs.existsSync(partFile)) {
-          if (fs.existsSync(tempFile)) {
-            fs.unlinkSync(tempFile); // remove old complete file
-          }
-          fs.renameSync(partFile, tempFile);
+        if (fs.existsSync(tempFile)) {
           console.log(`[YouTube Prepare] Download complete. Serving file: ${tempFile}`);
           activeWaiters.forEach(w => {
             if (!w.res.headersSent) {
@@ -185,7 +202,7 @@ app.get('/api/youtube-prepare', (req, res) => {
             }
           });
         } else {
-          throw new Error("Downloaded part file not found on disk.");
+          throw new Error("Downloaded video file not found on disk.");
         }
       } catch (e) {
         console.error("[YouTube Prepare] Post-download error:", e.message);
