@@ -9,22 +9,22 @@ const MEMBER_INFO = {
   haechan: { name: "Haechan", kor: "해찬" }
 };
 
-// Custom matching thresholds per member (Euclidean distance, lower is stricter)
+// Custom matching thresholds per member (InsightFace 512D ArcFace Cosine Distance: 0.42 threshold)
 const MEMBER_THRESHOLDS = {
-  johnny: 0.43,
-  taeyong: 0.40,  // Stricter to prevent cross-matching with other members
-  yuta: 0.44,
-  doyoung: 0.42,
-  jaehyun: 0.41,  // Stricter to prevent false positives
-  jungwoo: 0.42,
-  haechan: 0.43
+  johnny: 0.42,   // ~58%+ similarity confidence
+  taeyong: 0.42,  // ~58%+ similarity confidence
+  yuta: 0.42,     // ~58%+ similarity confidence
+  doyoung: 0.42,  // ~58%+ similarity confidence
+  jaehyun: 0.42,  // ~58%+ similarity confidence
+  jungwoo: 0.42,  // ~58%+ similarity confidence
+  haechan: 0.42   // ~58%+ similarity confidence
 };
 
 // Global application state
 let faceMatcher = null;
 let faceMatcherNoLimit = null;
 let activeDetector = 'ssd';
-let matchThreshold = 0.42;
+let matchThreshold = 0.42; // 512D ArcFace cutoffsimilarity confidence cutoff (concert-optimized)
 let stream = null;
 
 // TouchDesigner integration state
@@ -394,7 +394,28 @@ function highlightCatalogMember(label) {
   }
 }
 
-// K-NN (Top-K) Mean Distance Classifier for robust outlier rejection
+// Cosine Distance Calculator with L2 Normalization (Supports 128-D, 512-D and any vector dim)
+function calcCosineDistance(vecA, vecB) {
+  if (!vecA || !vecB) return 1.0;
+  let dot = 0.0;
+  let normA = 0.0;
+  let normB = 0.0;
+  const len = Math.min(vecA.length, vecB.length);
+  for (let i = 0; i < len; i++) {
+    const a = vecA[i];
+    const b = vecB[i];
+    dot += a * b;
+    normA += a * a;
+    normB += b * b;
+  }
+  normA = Math.sqrt(normA);
+  normB = Math.sqrt(normB);
+  if (normA === 0 || normB === 0) return 1.0;
+  const cosSim = dot / (normA * normB);
+  return 1.0 - Math.max(-1.0, Math.min(1.0, cosSim));
+}
+
+// Top-K NN Matcher supporting Cosine Distance & Variable Vector Dimensions
 function findKnnMatch(queryDescriptor, topK = 3) {
   if (!labeledDescriptors || labeledDescriptors.length === 0) {
     return { label: 'unknown', distance: 1.0 };
@@ -408,7 +429,8 @@ function findKnnMatch(queryDescriptor, topK = 3) {
     const distances = [];
 
     for (let desc of ld.descriptors) {
-      const dist = faceapi.euclideanDistance(queryDescriptor, desc);
+      // Calculate Cosine Distance
+      const dist = calcCosineDistance(queryDescriptor, desc);
       distances.push(dist);
     }
 
@@ -419,16 +441,44 @@ function findKnnMatch(queryDescriptor, topK = 3) {
     const topKDistances = distances.slice(0, k);
     const meanDist = topKDistances.reduce((a, b) => a + b, 0) / k;
 
-    // Apply per-member strictness multiplier if defined
-    const memberThreshold = MEMBER_THRESHOLDS[label] || matchThreshold;
-    
     if (meanDist < minKnnDist) {
       minKnnDist = meanDist;
       bestLabel = label;
     }
   }
-
   return { label: bestLabel, distance: minKnnDist };
+}
+
+// High-Speed 512-D InsightFace ArcFace Recognition Client
+async function recognizeFace512D(videoEl, box) {
+  try {
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = 160;
+    cropCanvas.height = 160;
+    const cropCtx = cropCanvas.getContext('2d');
+
+    const padW = box.width * 0.15;
+    const padH = box.height * 0.15;
+    const sx = Math.max(0, box.x - padW);
+    const sy = Math.max(0, box.y - padH);
+    const sw = Math.min(videoEl.videoWidth - sx, box.width + padW * 2);
+    const sh = Math.min(videoEl.videoHeight - sy, box.height + padH * 2);
+
+    cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 160, 160);
+    const b64 = cropCanvas.toDataURL('image/jpeg', 0.85);
+
+    const resp = await fetch('/api/recognize-512d', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64, topK: 3 })
+    });
+    if (resp.ok) {
+      return await resp.json();
+    }
+  } catch (e) {
+    // Fallback to local matcher if Python service unreachable
+  }
+  return null;
 }
 
 // 5. Temporal Webcam Voting & Tracking algorithm
@@ -460,17 +510,41 @@ function trackAndSmoothDetections(detections) {
       }
     });
 
-    // Use Top-3 K-NN Mean Distance matching for maximum accuracy
-    const bestMatch = findKnnMatch(det.descriptor, 3);
-    const rawLabel = bestMatch.label;
-    const distance = bestMatch.distance;
+    // Use 512-D ArcFace Match if available, else Fallback to KNN
+    let rawLabel = 'unknown';
+    let distance = 1.0;
 
+    if (det.match512 && det.match512.matched) {
+      rawLabel = det.match512.label;
+      distance = det.match512.distance;
+    } else {
+      const bestMatch = findKnnMatch(det.descriptor, 3);
+      rawLabel = bestMatch.label;
+      distance = bestMatch.distance;
+    }
+
+    const similarityPercent = Math.round(Math.max(0, 1 - distance) * 100);
     const targetThreshold = (rawLabel !== 'unknown' && MEMBER_THRESHOLDS[rawLabel]) ? MEMBER_THRESHOLDS[rawLabel] : matchThreshold;
-    const resolvedLabel = (rawLabel !== 'unknown' && distance < targetThreshold) ? rawLabel : 'unknown';
+    const resolvedLabel = (rawLabel !== 'unknown' && distance <= targetThreshold) ? rawLabel : 'unknown';
 
     if (bestTrack) {
-      bestTrack.lastBox = box;
       bestTrack.lastSeen = now;
+      bestTrack.targetBox = { x: box.x, y: box.y, width: box.width, height: box.height };
+
+      // 60FPS Lerp Interpolation for silky smooth tracking
+      const alpha = 0.35;
+      if (!bestTrack.smoothBox) {
+        bestTrack.smoothBox = { ...bestTrack.targetBox };
+      } else {
+        bestTrack.smoothBox = {
+          x: bestTrack.smoothBox.x + (box.x - bestTrack.smoothBox.x) * alpha,
+          y: bestTrack.smoothBox.y + (box.y - bestTrack.smoothBox.y) * alpha,
+          width: bestTrack.smoothBox.width + (box.width - bestTrack.smoothBox.width) * alpha,
+          height: bestTrack.smoothBox.height + (box.height - bestTrack.smoothBox.height) * alpha
+        };
+      }
+      bestTrack.lastBox = bestTrack.smoothBox;
+
       bestTrack.history.push(resolvedLabel);
       if (bestTrack.history.length > 15) bestTrack.history.shift(); // Keep last 15 frames for better smoothing
 
@@ -491,24 +565,27 @@ function trackAndSmoothDetections(detections) {
       const finalLabel = maxVotes >= Math.min(5, bestTrack.history.length) ? winnerLabel : 'unknown';
 
       trackedResults.push({
-        detection: det.detection,
+        detection: { ...det.detection, box: bestTrack.smoothBox },
         descriptor: det.descriptor,
         label: finalLabel,
         distance: distance
       });
     } else {
-      // Create a brand new track
+      // Create a brand new track with smooth initial state
       trackCounter++;
+      const initBox = { x: box.x, y: box.y, width: box.width, height: box.height };
       const newTrack = {
         id: trackCounter,
-        lastBox: box,
+        lastBox: initBox,
+        smoothBox: initBox,
+        targetBox: initBox,
         history: [resolvedLabel],
         lastSeen: now
       };
       faceTracks.push(newTrack);
 
       trackedResults.push({
-        detection: det.detection,
+        detection: { ...det.detection, box: initBox },
         descriptor: det.descriptor,
         label: resolvedLabel, // use instant label on first frame
         distance: distance
@@ -584,7 +661,12 @@ function stopCamera() {
   logToLoader("Webcam feed stopped.");
 }
 
-// 7. Real-time Face Recognition loop
+// 7. Real-time Face Recognition loop (Separated: AI Detection async + Rendering 60fps)
+
+// Shared state between AI detection and rendering loops
+let latestSmoothedResults = [];
+let isAiDetectionRunning = false;
+
 async function runRecognitionLoop() {
   console.log("[DEBUG] runRecognitionLoop() called, isCameraActive:", isCameraActive);
   if (!isCameraActive) return;
@@ -595,240 +677,302 @@ async function runRecognitionLoop() {
 
   const ctx = canvas.getContext('2d');
 
-  async function detect() {
-    console.log("[DEBUG] detect() frame iteration running, isCameraActive:", isCameraActive);
+  // === AI Detection Loop (runs as fast as the model allows, ~15-30fps) ===
+  async function aiDetectionLoop() {
     if (!isCameraActive) return;
 
     try {
+      if (isAiDetectionRunning) {
+        setTimeout(aiDetectionLoop, 16);
+        return;
+      }
+      isAiDetectionRunning = true;
+
       let detections = [];
 
-      // Select face detector based on settings
       if (activeDetector === 'ssd') {
         detections = await faceapi.detectAllFaces(
           webcam,
-          new faceapi.SsdMobilenetv1Options({ minConfidence: 0.40 })
+          new faceapi.SsdMobilenetv1Options({ minConfidence: 0.35 })
         ).withFaceLandmarks().withFaceDescriptors();
       } else {
         detections = await faceapi.detectAllFaces(
           webcam,
-          new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 })
+          new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.30 })
         ).withFaceLandmarks().withFaceDescriptors();
       }
 
       const resizedDetections = faceapi.resizeResults(detections, displaySize);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      let smoothedResults = [];
+      if (resizedDetections.length > 0) {
+        // Query 512-D InsightFace ArcFace Engine for detected faces
+        for (let det of resizedDetections) {
+          const match512 = await recognizeFace512D(webcam, det.detection.box);
+          if (match512) {
+            det.match512 = match512;
+          }
+        }
+        latestSmoothedResults = trackAndSmoothDetections(resizedDetections);
+      } else if (resizedDetections.length === 0) {
+        // Let tracks age out naturally via maxAge
+      }
 
-      if (faceMatcher && resizedDetections.length > 0) {
-        // Run temporal tracking and voting
-        smoothedResults = trackAndSmoothDetections(resizedDetections);
+      isAiDetectionRunning = false;
+    } catch (err) {
+      console.error("Error in AI detection loop:", err);
+      isAiDetectionRunning = false;
+    }
 
-        smoothedResults.forEach(result => {
-          const box = result.detection.box;
-          const label = result.label;
-          const distance = result.distance;
-          const isUnknown = label === 'unknown';
+    // Schedule next AI detection
+    if (isCameraActive) {
+      setTimeout(aiDetectionLoop, 0);
+    }
+  }
 
-          console.log(`[DETECTION] Face detected: label=${label}, distance=${distance.toFixed(3)}, percent=${Math.round((1 - distance) * 100)}%`);
+  // === 60FPS Render Loop (independent, smooth interpolation) ===
+  function renderLoop() {
+    if (!isCameraActive) return;
 
-          let displayLabel = '';
-          let color = '';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-          if (isUnknown) {
-            // Find absolute closest match from our no-limit matcher
-            const closest = faceMatcherNoLimit.findBestMatch(result.descriptor);
-            const closestName = MEMBER_INFO[closest.label]?.name || closest.label;
-            const closestDistance = closest.distance;
-            const matchPercent = Math.round((1 - closestDistance) * 100);
-            displayLabel = `NO MATCH (BEST: ${closestName.toUpperCase()} [${matchPercent}%])`;
-            color = '#ff3333';
+    // Interpolate all active tracks toward their target positions for buttery smooth rendering
+    const now = Date.now();
+    const lerpAlpha = 0.30;
+
+    faceTracks.forEach(track => {
+      if (now - track.lastSeen > 1200) return; // Skip dead tracks
+      if (!track.smoothBox || !track.targetBox) return;
+
+      // Lerp smooth box toward target box each render frame
+      track.smoothBox = {
+        x: track.smoothBox.x + (track.targetBox.x - track.smoothBox.x) * lerpAlpha,
+        y: track.smoothBox.y + (track.targetBox.y - track.smoothBox.y) * lerpAlpha,
+        width: track.smoothBox.width + (track.targetBox.width - track.smoothBox.width) * lerpAlpha,
+        height: track.smoothBox.height + (track.targetBox.height - track.smoothBox.height) * lerpAlpha
+      };
+      track.lastBox = track.smoothBox;
+    });
+
+    // Draw all current results with interpolated positions
+    const smoothedResults = latestSmoothedResults;
+
+    if (smoothedResults.length > 0) {
+      smoothedResults.forEach(result => {
+        // Find this result's track to get the smoothed box
+        const resultCenter = {
+          x: result.detection.box.x + result.detection.box.width / 2,
+          y: result.detection.box.y + result.detection.box.height / 2
+        };
+        let renderBox = result.detection.box;
+
+        // Find matching track with closest center
+        let bestTrack = null;
+        let bestDist = Infinity;
+        faceTracks.forEach(t => {
+          if (!t.smoothBox) return;
+          const tc = { x: t.smoothBox.x + t.smoothBox.width / 2, y: t.smoothBox.y + t.smoothBox.height / 2 };
+          const d = Math.hypot(resultCenter.x - tc.x, resultCenter.y - tc.y);
+          if (d < bestDist && d < 200) {
+            bestDist = d;
+            bestTrack = t;
+          }
+        });
+
+        if (bestTrack && bestTrack.smoothBox) {
+          renderBox = bestTrack.smoothBox;
+        }
+
+        const label = result.label;
+        const distance = result.distance;
+        const isUnknown = label === 'unknown';
+
+        let displayLabel = '';
+        let color = '';
+
+        if (isUnknown) {
+          const closest = faceMatcherNoLimit.findBestMatch(result.descriptor);
+          const closestName = MEMBER_INFO[closest.label]?.name || closest.label;
+          const closestDistance = closest.distance;
+          const matchPercent = Math.round((1 - closestDistance) * 100);
+          displayLabel = `NO MATCH (BEST: ${closestName.toUpperCase()} [${matchPercent}%])`;
+          color = '#ff3333';
+        } else {
+          const confidence = Math.round((1 - distance) * 100);
+          displayLabel = `${MEMBER_INFO[label]?.name.toUpperCase() || label.toUpperCase()} [${confidence}%]`;
+          color = '#c9fc00';
+        }
+
+        // Draw Glowing Cyber Bracket Box
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+
+        const x = renderBox.x;
+        const y = renderBox.y;
+        const w = renderBox.width;
+        const h = renderBox.height;
+        const bracketLength = Math.min(w, h) * 0.15;
+
+        ctx.beginPath();
+        ctx.moveTo(x + bracketLength, y); ctx.lineTo(x, y); ctx.lineTo(x, y + bracketLength);
+        ctx.moveTo(x + w - bracketLength, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + bracketLength);
+        ctx.moveTo(x, y + h - bracketLength); ctx.lineTo(x, y + h); ctx.lineTo(x + bracketLength, y + h);
+        ctx.moveTo(x + w - bracketLength, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - bracketLength);
+        ctx.stroke();
+
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = isUnknown ? 'rgba(255, 51, 51, 0.05)' : 'rgba(201, 252, 0, 0.05)';
+        ctx.fillRect(x, y, w, h);
+
+        ctx.font = 'bold 11px "Orbitron", monospace';
+        const textWidth = ctx.measureText(displayLabel).width;
+
+        ctx.fillStyle = 'rgba(6, 6, 8, 0.85)';
+        ctx.fillRect(x, y - 22, textWidth + 16, 18);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x, y - 22, textWidth + 16, 18);
+
+        ctx.fillStyle = isUnknown ? '#ff5555' : '#c9fc00';
+        ctx.fillText(displayLabel, x + 8, y - 9);
+
+        if (!isUnknown) {
+          highlightCatalogMember(label);
+        }
+
+        // Real-time Video Face Harvesting
+        if (isHarvestingActive) {
+          const harvestNow = Date.now();
+          const harvestTarget = harvestTargetSelect.value;
+          const isForceHarvest = chkForceTarget && chkForceTarget.checked && harvestTarget !== 'all';
+
+          if (isForceHarvest) {
+            const lastHarvest = lastHarvestTimes[harvestTarget] || 0;
+            const cooldown = 2000;
+            if (harvestNow - lastHarvest > cooldown) {
+              lastHarvestTimes[harvestTarget] = harvestNow;
+              logToLoader(`[HARVEST] Force Harvesting face for ${harvestTarget.toUpperCase()} (1-Person Mode)...`, "info");
+              harvestFace(harvestTarget, renderBox, 0, result.descriptor);
+            }
           } else {
-            const confidence = Math.round((1 - distance) * 100);
-            displayLabel = `${MEMBER_INFO[label]?.name.toUpperCase() || label.toUpperCase()} [${confidence}%]`;
-            color = '#c9fc00';
-          }
-
-          // Draw Glowing Cyber Bracket Box
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 3;
-          ctx.shadowColor = color;
-          ctx.shadowBlur = 10;
-
-          const x = box.x;
-          const y = box.y;
-          const w = box.width;
-          const h = box.height;
-          const bracketLength = Math.min(w, h) * 0.15;
-
-          ctx.beginPath();
-          // Top Left
-          ctx.moveTo(x + bracketLength, y); ctx.lineTo(x, y); ctx.lineTo(x, y + bracketLength);
-          // Top Right
-          ctx.moveTo(x + w - bracketLength, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + bracketLength);
-          // Bottom Left
-          ctx.moveTo(x, y + h - bracketLength); ctx.lineTo(x, y + h); ctx.lineTo(x + bracketLength, y + h);
-          // Bottom Right
-          ctx.moveTo(x + w - bracketLength, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - bracketLength);
-          ctx.stroke();
-
-          // Reset shadow
-          ctx.shadowBlur = 0;
-
-          // Subtle semi-transparent box background fill
-          ctx.fillStyle = isUnknown ? 'rgba(255, 51, 51, 0.05)' : 'rgba(201, 252, 0, 0.05)';
-          ctx.fillRect(x, y, w, h);
-
-          // Draw Label Banner
-          ctx.font = 'bold 11px "Orbitron", monospace';
-          const textWidth = ctx.measureText(displayLabel).width;
-
-          ctx.fillStyle = 'rgba(6, 6, 8, 0.85)';
-          ctx.fillRect(x, y - 22, textWidth + 16, 18);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1;
-          ctx.strokeRect(x, y - 22, textWidth + 16, 18);
-
-          ctx.fillStyle = isUnknown ? '#ff5555' : '#c9fc00';
-          ctx.fillText(displayLabel, x + 8, y - 9);
-
-          // Highlight matched card in the catalog sidebar (only for known matches)
-          if (!isUnknown) {
-            highlightCatalogMember(label);
-          }
-
-          // Real-time Video Face Harvesting (Harvests both known & close unknown profiles of the target)
-          if (isHarvestingActive) {
-            const now = Date.now();
-            const harvestTarget = harvestTargetSelect.value;
-            const isForceHarvest = chkForceTarget && chkForceTarget.checked && harvestTarget !== 'all';
-
-            if (isForceHarvest) {
-              // Force Single Target Mode: Harvest every single detected face regardless of matching scores
-              const lastHarvest = lastHarvestTimes[harvestTarget] || 0;
-              const cooldown = 2000; // 2 seconds cooldown per harvest
-
-              if (now - lastHarvest > cooldown) {
-                lastHarvestTimes[harvestTarget] = now;
-                logToLoader(`[HARVEST] Force Harvesting face for ${harvestTarget.toUpperCase()} (1-Person Mode)...`, "info");
-                // Bypass matching distance and feed raw descriptor
-                harvestFace(harvestTarget, box, 0, result.descriptor);
-              }
-            } else {
-              // Standard matching harvesting mode
-              let targetLabel = label;
-              let targetDistance = distance;
-              
-              if (isUnknown) {
-                const closest = faceMatcherNoLimit.findBestMatch(result.descriptor);
-                targetLabel = closest.label;
-                targetDistance = closest.distance;
-              }
-
-              // Skip if the closest match is still unknown
-              if (targetLabel && targetLabel !== 'unknown') {
-                const lastHarvest = lastHarvestTimes[targetLabel] || 0;
-                const cooldown = 2000; // 2 seconds cooldown per member to avoid flooding
-                
-                const isTarget = (harvestTarget === 'all' || harvestTarget === targetLabel);
-                
-                // Dynamically set harvesting threshold based on the user-controlled matchThreshold slider
-                const harvestThreshold = isUnknown ? (matchThreshold * 1.05) : (matchThreshold * 0.9);
-                const isPassingCriteria = (targetDistance <= harvestThreshold);
-
-                if (isTarget && (now - lastHarvest > cooldown)) {
-                  if (isPassingCriteria) {
-                    lastHarvestTimes[targetLabel] = now;
-                    harvestFace(targetLabel, box, targetDistance, result.descriptor);
-                  } else {
-                    lastHarvestTimes[targetLabel] = now;
-                    const similarity = Math.round((1 - targetDistance) * 100);
-                    const reqPercent = Math.round((1 - harvestThreshold) * 100);
-                    logToLoader(`[HARVEST] Skipped ${targetLabel.toUpperCase()}${isUnknown ? ' (NEW ANGLE)' : ''}: Similarity (${similarity}%) below harvest requirement (${reqPercent}%).`, "info");
-                  }
+            let targetLabel = label;
+            let targetDistance = distance;
+            if (isUnknown) {
+              const closest = faceMatcherNoLimit.findBestMatch(result.descriptor);
+              targetLabel = closest.label;
+              targetDistance = closest.distance;
+            }
+            if (targetLabel && targetLabel !== 'unknown') {
+              const lastHarvest = lastHarvestTimes[targetLabel] || 0;
+              const cooldown = 2000;
+              const isTarget = (harvestTarget === 'all' || harvestTarget === targetLabel);
+              const harvestThreshold = isUnknown ? (matchThreshold * 1.05) : (matchThreshold * 0.9);
+              const isPassingCriteria = (targetDistance <= harvestThreshold);
+              if (isTarget && (harvestNow - lastHarvest > cooldown)) {
+                if (isPassingCriteria) {
+                  lastHarvestTimes[targetLabel] = harvestNow;
+                  harvestFace(targetLabel, renderBox, targetDistance, result.descriptor);
+                } else {
+                  lastHarvestTimes[targetLabel] = harvestNow;
+                  const similarity = Math.round((1 - targetDistance) * 100);
+                  const reqPercent = Math.round((1 - harvestThreshold) * 100);
+                  logToLoader(`[HARVEST] Skipped ${targetLabel.toUpperCase()}${isUnknown ? ' (NEW ANGLE)' : ''}: Similarity (${similarity}%) below harvest requirement (${reqPercent}%).`, "info");
                 }
               }
             }
           }
-        });
-      }
-
-      // Stream to TouchDesigner via WebSocket if enabled
-      if (isTdStreaming && ws && ws.readyState === WebSocket.OPEN) {
-        const tdPayload = {
-          type: 'face_tracking',
-          timestamp: Date.now(),
-          width: webcam.videoWidth,
-          height: webcam.videoHeight,
-          facesCount: smoothedResults.length,
-          faces: []
-        };
-
-        smoothedResults.forEach(result => {
-          const box = result.detection.box;
-          const label = result.label;
-          const distance = result.distance;
-          const isUnknown = label === 'unknown';
-
-          // Coordinates calculation
-          const normX = box.x / webcam.videoWidth;
-          const normY = box.y / webcam.videoHeight;
-          const normWidth = box.width / webcam.videoWidth;
-          const normHeight = box.height / webcam.videoHeight;
-
-          const centerX = box.x + box.width / 2;
-          const centerY = box.y + box.height / 2;
-          const normCenterX = centerX / webcam.videoWidth;
-          const normCenterY = centerY / webcam.videoHeight;
-
-          // Landmarks conversion
-          const rawLandmarks = result.detection.landmarks?.positions || [];
-          const landmarks = rawLandmarks.map(pt => ({
-            x: Math.round(pt.x),
-            y: Math.round(pt.y),
-            normX: parseFloat((pt.x / webcam.videoWidth).toFixed(4)),
-            normY: parseFloat((pt.y / webcam.videoHeight).toFixed(4))
-          }));
-
-          const memberInfo = MEMBER_INFO[label] || { name: 'Unknown', kor: '미확인' };
-
-          tdPayload.faces.push({
-            id: label,
-            name: memberInfo.name,
-            korName: memberInfo.kor,
-            confidence: isUnknown ? 0 : parseFloat((1 - distance).toFixed(4)),
-            isUnknown: isUnknown,
-            box: {
-              x: Math.round(box.x),
-              y: Math.round(box.y),
-              width: Math.round(box.width),
-              height: Math.round(box.height),
-              normX: parseFloat(normX.toFixed(4)),
-              normY: parseFloat(normY.toFixed(4)),
-              normWidth: parseFloat(normWidth.toFixed(4)),
-              normHeight: parseFloat(normHeight.toFixed(4))
-            },
-            center: {
-              x: Math.round(centerX),
-              y: Math.round(centerY),
-              normX: parseFloat(normCenterX.toFixed(4)),
-              normY: parseFloat(normCenterY.toFixed(4))
-            },
-            landmarks: landmarks
-          });
-        });
-
-        ws.send(JSON.stringify(tdPayload));
-      }
-    } catch (err) {
-      console.error("Error in detection loop:", err);
+        }
+      });
     }
 
-    // Schedule next frame
-    requestAnimationFrame(detect);
+    // Stream to TouchDesigner via WebSocket at 60fps with interpolated coordinates
+    if (isTdStreaming && ws && ws.readyState === WebSocket.OPEN) {
+      const tdPayload = {
+        type: 'face_tracking',
+        timestamp: Date.now(),
+        width: webcam.videoWidth,
+        height: webcam.videoHeight,
+        facesCount: smoothedResults.length,
+        faces: []
+      };
+
+      smoothedResults.forEach(result => {
+        // Use interpolated track box for TD too
+        const resultCenter = {
+          x: result.detection.box.x + result.detection.box.width / 2,
+          y: result.detection.box.y + result.detection.box.height / 2
+        };
+        let box = result.detection.box;
+        faceTracks.forEach(t => {
+          if (!t.smoothBox) return;
+          const tc = { x: t.smoothBox.x + t.smoothBox.width / 2, y: t.smoothBox.y + t.smoothBox.height / 2 };
+          if (Math.hypot(resultCenter.x - tc.x, resultCenter.y - tc.y) < 200) {
+            box = t.smoothBox;
+          }
+        });
+
+        const label = result.label;
+        const distance = result.distance;
+        const isUnknown = label === 'unknown';
+
+        const normX = box.x / webcam.videoWidth;
+        const normY = box.y / webcam.videoHeight;
+        const normWidth = box.width / webcam.videoWidth;
+        const normHeight = box.height / webcam.videoHeight;
+
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        const normCenterX = centerX / webcam.videoWidth;
+        const normCenterY = centerY / webcam.videoHeight;
+
+        const rawLandmarks = result.detection.landmarks?.positions || [];
+        const landmarks = rawLandmarks.map(pt => ({
+          x: Math.round(pt.x),
+          y: Math.round(pt.y),
+          normX: parseFloat((pt.x / webcam.videoWidth).toFixed(4)),
+          normY: parseFloat((pt.y / webcam.videoHeight).toFixed(4))
+        }));
+
+        const memberInfo = MEMBER_INFO[label] || { name: 'Unknown', kor: '\uBBF8\uD655\uC778' };
+
+        tdPayload.faces.push({
+          id: label,
+          name: memberInfo.name,
+          korName: memberInfo.kor,
+          confidence: isUnknown ? 0 : parseFloat((1 - distance).toFixed(4)),
+          isUnknown: isUnknown,
+          box: {
+            x: Math.round(box.x),
+            y: Math.round(box.y),
+            width: Math.round(box.width),
+            height: Math.round(box.height),
+            normX: parseFloat(normX.toFixed(4)),
+            normY: parseFloat(normY.toFixed(4)),
+            normWidth: parseFloat(normWidth.toFixed(4)),
+            normHeight: parseFloat(normHeight.toFixed(4))
+          },
+          center: {
+            x: Math.round(centerX),
+            y: Math.round(centerY),
+            normX: parseFloat(normCenterX.toFixed(4)),
+            normY: parseFloat(normCenterY.toFixed(4))
+          },
+          landmarks: landmarks
+        });
+      });
+
+      ws.send(JSON.stringify(tdPayload));
+    }
+
+    // Schedule next render frame at 60fps
+    requestAnimationFrame(renderLoop);
   }
 
-  requestAnimationFrame(detect);
+  // Start both loops independently
+  aiDetectionLoop();
+  requestAnimationFrame(renderLoop);
 }
 
 // 8. Event Listeners & UI Controls
@@ -997,7 +1141,7 @@ function loadVideoFeed(srcUrl, name) {
       setTimeout(startPlayback, 100);
       return;
     }
-    
+
     console.log(`[DEBUG] Video size confirmed: ${webcam.videoWidth}x${webcam.videoHeight}`);
     canvas.width = webcam.videoWidth;
     canvas.height = webcam.videoHeight;
@@ -1016,7 +1160,7 @@ function loadVideoFeed(srcUrl, name) {
   // Listen to both loadedmetadata and canplay to cover different browser behaviors
   webcam.onloadedmetadata = startPlayback;
   webcam.oncanplay = startPlayback;
-  
+
   // Also check if already ready
   if (webcam.readyState >= 2 && webcam.videoWidth > 0) {
     startPlayback();
@@ -1097,8 +1241,17 @@ function harvestFace(memberId, box, distance, descriptor) {
       return;
     }
 
-    const existingAutoCount = databaseImages[memberId] ? databaseImages[memberId].filter(i => i.includes('/auto_')).length : 0;
-    const autoIndex = 100 + existingAutoCount;
+    let maxAutoIdx = 99;
+    if (databaseImages[memberId]) {
+      databaseImages[memberId].forEach(imgPath => {
+        const match = imgPath.match(/\/auto_(\d+)\./);
+        if (match) {
+          const idx = parseInt(match[1], 10);
+          if (!isNaN(idx) && idx > maxAutoIdx) maxAutoIdx = idx;
+        }
+      });
+    }
+    const autoIndex = maxAutoIdx + 1;
     const filename = `auto_${autoIndex}.jpg`;
     const similarity = Math.round((1 - distance) * 100);
 
@@ -1113,63 +1266,70 @@ function harvestFace(memberId, box, distance, descriptor) {
         filename: filename
       })
     })
-    .then(async (response) => {
-      if (response.ok) {
-        logToLoader(`[HARVEST] ✓ Saved auto_${autoIndex}.jpg for ${memberId.toUpperCase()}!`, "success");
+      .then(async (response) => {
+        if (response.ok) {
+          logToLoader(`[HARVEST] ✓ Saved auto_${autoIndex}.jpg for ${memberId.toUpperCase()}!`, "success");
 
-        // 1. Add descriptor directly to memory
-        const memberLd = labeledDescriptors.find(ld => ld.label === memberId);
-        if (memberLd && descriptor) {
-          memberLd.descriptors.push(descriptor);
-        }
+          // 1. Add descriptor directly to memory
+          const memberLd = labeledDescriptors.find(ld => ld.label === memberId);
+          if (memberLd && descriptor) {
+            memberLd.descriptors.push(descriptor);
+          }
 
-        // 2. Update the active FaceMatchers live without page reloads
-        faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, matchThreshold);
-        faceMatcherNoLimit = new faceapi.FaceMatcher(labeledDescriptors, 1.0);
+          // 1.5. Add saved image path to local databaseImages catalog
+          if (!databaseImages[memberId]) databaseImages[memberId] = [];
+          const savedPath = `/members/${memberId}/${filename}`;
+          if (!databaseImages[memberId].includes(savedPath)) {
+            databaseImages[memberId].push(savedPath);
+          }
 
-        // 3. Update overall face descriptors count in UI
-        let totalDescriptors = labeledDescriptors.reduce((sum, ld) => sum + ld.descriptors.length, 0);
-        dbDescriptorCount.textContent = totalDescriptors;
+          // 2. Update the active FaceMatchers live without page reloads
+          faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, matchThreshold);
+          faceMatcherNoLimit = new faceapi.FaceMatcher(labeledDescriptors, 1.0);
 
-        // 4. Save updated descriptors database to Server descriptors.json
-        const cacheArray = labeledDescriptors.map(ld => ({
-          label: ld.label,
-          descriptors: ld.descriptors.map(d => Array.from(d))
-        }));
-        
-        fetch('/api/save-descriptors', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ descriptors: cacheArray })
-        }).catch(e => console.error("Failed to save descriptors to server:", e));
+          // 3. Update overall face descriptors count in UI
+          let totalDescriptors = labeledDescriptors.reduce((sum, ld) => sum + ld.descriptors.length, 0);
+          dbDescriptorCount.textContent = totalDescriptors;
 
-        // 5. Update localStorage cache
-        try {
-          localStorage.setItem('nct127_face_descriptors_v5', JSON.stringify(cacheArray));
-        } catch (e) { }
+          // 4. Save updated descriptors database to Server descriptors.json
+          const cacheArray = labeledDescriptors.map(ld => ({
+            label: ld.label,
+            descriptors: ld.descriptors.map(d => Array.from(d))
+          }));
 
-        // 6. Regenerate database mapping and update UI
-        fetch('/api/regenerate-db', { method: 'POST' })
-          .then(async (r) => {
-            if (r.ok) {
-              const memberListResp = await fetch('/members.json');
-              if (memberListResp.ok) {
-                const db = await memberListResp.json();
-                db.members.forEach(m => {
-                  databaseStats[m.id] = { total: m.images.length, kept: m.images.length, discarded: 0 };
-                  databaseImages[m.id] = m.images;
-                });
-                renderMemberCatalog(db.members, false);
+          fetch('/api/save-descriptors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ descriptors: cacheArray })
+          }).catch(e => console.error("Failed to save descriptors to server:", e));
+
+          // 5. Update localStorage cache
+          try {
+            localStorage.setItem('nct127_face_descriptors_v5', JSON.stringify(cacheArray));
+          } catch (e) { }
+
+          // 6. Regenerate database mapping and update UI
+          fetch('/api/regenerate-db', { method: 'POST' })
+            .then(async (r) => {
+              if (r.ok) {
+                const memberListResp = await fetch('/members.json');
+                if (memberListResp.ok) {
+                  const db = await memberListResp.json();
+                  db.members.forEach(m => {
+                    databaseStats[m.id] = { total: m.images.length, kept: m.images.length, discarded: 0 };
+                    databaseImages[m.id] = m.images;
+                  });
+                  renderMemberCatalog(db.members, false);
+                }
               }
-            }
-          });
-      } else {
-        logToLoader(`[HARVEST] Failed to save image for ${memberId.toUpperCase()}`, "error");
-      }
-    })
-    .catch((e) => {
-      console.error("Harvester upload error:", e);
-    });
+            });
+        } else {
+          logToLoader(`[HARVEST] Failed to save image for ${memberId.toUpperCase()}`, "error");
+        }
+      })
+      .catch((e) => {
+        console.error("Harvester upload error:", e);
+      });
   } catch (err) {
     console.error("Failed to crop face frame:", err);
   }
@@ -1415,9 +1575,27 @@ function logToBooster(message, type = 'info') {
   boosterLogs.scrollTop = boosterLogs.scrollHeight;
 }
 
-// Biometric Euclidean distance calculation
+// Biometric Euclidean distance calculation (Supports dynamic 128D / 512D vectors)
 function getEuclideanDistance(arr1, arr2) {
-  return Math.sqrt(arr1.reduce((sum, val, i) => sum + Math.pow(val - arr2[i], 2), 0));
+  if (!arr1 || !arr2 || arr1.length === 0 || arr2.length === 0) return 1.0;
+  // If dimensions match, compute full Euclidean distance
+  if (arr1.length === arr2.length) {
+    let sum = 0;
+    for (let i = 0; i < arr1.length; i++) {
+      const diff = arr1[i] - arr2[i];
+      sum += diff * diff;
+    }
+    return Math.sqrt(sum);
+  }
+  // If dimensions differ (e.g., 128D webcam descriptor vs 512D server descriptor)
+  const len = Math.min(arr1.length, arr2.length);
+  let sum = 0;
+  for (let i = 0; i < len; i++) {
+    const diff = arr1[i] - arr2[i];
+    sum += diff * diff;
+  }
+  // Scale distance proportionally for dimensional mismatch
+  return Math.sqrt(sum * (Math.max(arr1.length, arr2.length) / len));
 }
 
 // Booster implementation running in the browser (supports interactive or background silent mode)
@@ -1605,8 +1783,17 @@ async function startAutoExpansion(silent = false) {
                 continue;
               }
 
-              const existingAutoCount = databaseImages[memberId] ? databaseImages[memberId].filter(i => i.includes('/auto_')).length : 0;
-              const autoIndex = 100 + existingAutoCount;
+              let maxAutoIdx = 99;
+              if (databaseImages[memberId]) {
+                databaseImages[memberId].forEach(imgPath => {
+                  const match = imgPath.match(/\/auto_(\d+)\./);
+                  if (match) {
+                    const idx = parseInt(match[1], 10);
+                    if (!isNaN(idx) && idx > maxAutoIdx) maxAutoIdx = idx;
+                  }
+                });
+              }
+              const autoIndex = maxAutoIdx + 1;
 
               logToBooster(`[${korName}] ✓ VERIFIED! Similarity: ${similarity}% (Distance: ${minDistance.toFixed(3)}). Saving auto_${autoIndex}.jpg...`, "success");
 

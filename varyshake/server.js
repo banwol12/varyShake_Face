@@ -124,7 +124,7 @@ app.get('/api/youtube-prepare', (req, res) => {
   try {
     const publicDir = path.join(__dirname, 'public');
     fs.readdirSync(publicDir).forEach(file => {
-      if (file.startsWith('youtube_temp.mp4')) {
+      if (file.startsWith('youtube_temp')) {
         try { fs.unlinkSync(path.join(publicDir, file)); } catch (e) {}
       }
     });
@@ -143,9 +143,8 @@ app.get('/api/youtube-prepare', (req, res) => {
 
   let stderrBuffer = '';
 
-  // Flexible format selection: works with or without ffmpeg
   const ytdlp = spawn('yt-dlp', [
-    '-f', 'best[ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best',
+    '-f', 'bv*[height<=1080]+ba/bv*[height<=1080]/b[height<=1080]/bestvideo[height<=1080]/best',
     '-o', tempFile,
     '--no-part',           // Download directly to target file without creating .part extension
     '--no-continue',       // Force fresh download, do not attempt range resume
@@ -155,10 +154,28 @@ app.get('/api/youtube-prepare', (req, res) => {
     cleanUrl
   ]);
 
+  ytdlp.stdout.on('data', (data) => {
+    const output = data.toString();
+    const chunks = output.split(/[\r\n]+/);
+    for (const chunk of chunks) {
+      const trimmed = chunk.trim();
+      if (!trimmed) continue;
+      if (trimmed.includes('[download]')) {
+        process.stdout.write(`\r[YouTube Download] ${trimmed}                                \r`);
+      } else {
+        console.log(`\n[YouTube Download] ${trimmed}`);
+      }
+    }
+  });
+
   ytdlp.stderr.on('data', (data) => {
     const msg = data.toString().trim();
     if (msg) {
-      console.log(`[YouTube Download] ${msg}`);
+      if (msg.includes('[download]')) {
+        process.stdout.write(`\r[YouTube Download] ${msg}                                \r`);
+      } else {
+        console.log(`\n[YouTube Download] ${msg}`);
+      }
       stderrBuffer += msg + '\n';
     }
   });
@@ -178,7 +195,7 @@ app.get('/api/youtube-prepare', (req, res) => {
     const activeWaiters = activeDownloads.get(cleanUrl) || [];
     activeDownloads.delete(cleanUrl);
 
-    if (code !== 0) {
+    if (code !== 0 && !stderrBuffer.includes('WARNING:')) {
       console.error(`[YouTube Prepare] yt-dlp exited with code ${code}. Stderr: ${stderrBuffer}`);
       let errorMsg = `yt-dlp download failed (code ${code})`;
       if (stderrBuffer.includes('ERROR:')) {
@@ -194,11 +211,32 @@ app.get('/api/youtube-prepare', (req, res) => {
       });
     } else {
       try {
-        if (fs.existsSync(tempFile)) {
-          console.log(`[YouTube Prepare] Download complete. Serving file: ${tempFile}`);
+        // Dynamically find the largest downloaded file matching youtube_temp in public/
+        let targetFile = null;
+        let maxSizeBytes = 0;
+        const publicDir = path.join(__dirname, 'public');
+        
+        if (fs.existsSync(publicDir)) {
+          const files = fs.readdirSync(publicDir);
+          for (const file of files) {
+            if (file.startsWith('youtube_temp')) {
+              const fullPath = path.join(publicDir, file);
+              try {
+                const stats = fs.statSync(fullPath);
+                if (stats.isFile() && stats.size > maxSizeBytes) {
+                  maxSizeBytes = stats.size;
+                  targetFile = file;
+                }
+              } catch (e) {}
+            }
+          }
+        }
+
+        if (targetFile && maxSizeBytes > 0) {
+          console.log(`[YouTube Prepare] Download complete. Serving target file: /${targetFile} (${(maxSizeBytes / (1024 * 1024)).toFixed(2)} MB)`);
           activeWaiters.forEach(w => {
             if (!w.res.headersSent) {
-              w.res.json({ success: true, videoUrl: '/youtube_temp.mp4' });
+              w.res.json({ success: true, videoUrl: `/${targetFile}` });
             }
           });
         } else {
@@ -493,30 +531,40 @@ app.post('/api/regenerate-db', (req, res) => {
   }
 });
 
-// Endpoint to save pre-calculated face descriptors to descriptors.json on the server
-app.post('/api/save-descriptors', (req, res) => {
-  const { descriptors } = req.body;
-  if (!descriptors) {
-    return res.status(400).json({ error: 'Descriptors data is required.' });
-  }
-
-  console.log('Saving pre-calculated face descriptors database...');
+// Proxy endpoint for 512-D InsightFace ArcFace recognition
+app.post('/api/recognize-512d', async (req, res) => {
   try {
-    const filePath = path.join(__dirname, 'public', 'descriptors.json');
-    fs.writeFileSync(filePath, JSON.stringify(descriptors, null, 2), 'utf-8');
-    console.log('  Descriptors database saved successfully to public/descriptors.json.');
-    res.json({ success: true });
+    const pyResponse = await fetch('http://localhost:5001/recognize-512d', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    if (!pyResponse.ok) throw new Error(`Python service status ${pyResponse.status}`);
+    const data = await pyResponse.json();
+    res.json(data);
   } catch (err) {
-    console.error('Error saving descriptors:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
+let py512Process = null;
+function startPython512DService() {
+  console.log('[*] Spawning 512-D InsightFace ArcFace Python Service...');
+  py512Process = spawn('python', [path.join(__dirname, 'python_512d_service.py')], {
+    stdio: 'inherit',
+    cwd: __dirname
+  });
+  py512Process.on('error', (err) => {
+    console.error('[!] Python 512D Service error:', err.message);
+  });
+}
 
 const server = app.listen(PORT, () => {
   console.log(`====================================================`);
   console.log(`   NCT 127 FACE ID EXPRESS SERVER ACTIVE             `);
   console.log(`   Localhost: http://localhost:${PORT}               `);
   console.log(`====================================================`);
+  startPython512DService();
 });
 
 // Setup WebSocket server for TouchDesigner integration

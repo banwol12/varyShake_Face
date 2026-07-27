@@ -40,15 +40,43 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+import numpy as np
+
+def align_face_img(rgb_img):
+    """양쪽 눈 좌표 기반 얼굴 수평 회전 정렬 (Face Alignment)"""
+    if not HAS_CV2:
+        return rgb_img
+    import cv2
+    try:
+        landmarks_list = face_recognition.face_landmarks(rgb_img)
+        if not landmarks_list or 'left_eye' not in landmarks_list[0] or 'right_eye' not in landmarks_list[0]:
+            return rgb_img
+        landmarks = landmarks_list[0]
+        left_eye_center = np.array(landmarks['left_eye']).mean(axis=0)
+        right_eye_center = np.array(landmarks['right_eye']).mean(axis=0)
+        dY = right_eye_center[1] - left_eye_center[1]
+        dX = right_eye_center[0] - left_eye_center[0]
+        angle = np.degrees(np.arctan2(dY, dX))
+        eyes_center = ((left_eye_center[0] + right_eye_center[0]) / 2.0,
+                       (left_eye_center[1] + right_eye_center[1]) / 2.0)
+        h, w = rgb_img.shape[:2]
+        M = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
+        return cv2.warpAffine(rgb_img, M, (w, h), flags=cv2.INTER_CUBIC)
+    except Exception:
+        return rgb_img
+
+def l2_norm(vec):
+    v = np.array(vec, dtype=np.float32)
+    norm = np.linalg.norm(v)
+    return (v / norm) if norm > 0 else v
+
 def load_member_anchors(member_id):
     """Loads all user-uploaded images in the member directory as 'golden truth' templates."""
     member_dir = os.path.join(BASE_DIR, member_id)
     if not os.path.exists(member_dir):
         return []
         
-    # Search for all user uploaded files (files named images-x.jpeg or any other manual image files)
     all_files = glob.glob(os.path.join(member_dir, "images-*")) + glob.glob(os.path.join(member_dir, "images.*"))
-    # Also include any files that are not named 'auto_' or 'temp_'
     for f in os.listdir(member_dir):
         if not f.startswith("auto_") and not f.startswith("temp_") and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
             full_path = os.path.join(member_dir, f)
@@ -60,9 +88,12 @@ def load_member_anchors(member_id):
     for path in all_files:
         try:
             image = face_recognition.load_image_file(path)
-            face_encs = face_recognition.face_encodings(image)
+            aligned = align_face_img(image)
+            face_encs = face_recognition.face_encodings(aligned)
+            if not face_encs:
+                face_encs = face_recognition.face_encodings(image)
             if face_encs:
-                encodings.append(face_encs[0])
+                encodings.append(l2_norm(face_encs[0]))
             else:
                 print(f"  Warning: No face detected in template: {os.path.basename(path)}")
         except Exception as e:
@@ -75,7 +106,6 @@ def download_and_verify_candidates(member, anchor_encs, max_additions=15):
     eng_name = member["eng"]
     kor_name = member["kor"]
     
-    # Query Bing Images (NCT + English Name + portrait)
     query = f"NCT {eng_name} solo portrait face"
     url = f"https://www.bing.com/images/search?q={urllib.parse.quote(query)}"
     
@@ -93,7 +123,7 @@ def download_and_verify_candidates(member, anchor_encs, max_additions=15):
     
     member_dir = os.path.join(BASE_DIR, member_id)
     success_count = 0
-    download_idx = 100 # start at index 100 to avoid overwriting user files
+    download_idx = 100
     
     for img_url in image_urls:
         if success_count >= max_additions:
@@ -118,26 +148,43 @@ def download_and_verify_candidates(member, anchor_encs, max_additions=15):
                 with open(temp_path, "wb") as f:
                     f.write(img_resp.read())
                     
-                # Analyze the face in downloaded image
                 try:
-                    # Blur check if OpenCV is available
                     if HAS_CV2:
                         img_cv2 = cv2.imread(temp_path)
                         if img_cv2 is not None:
                             gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
                             blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-                            if blur_score < 90.0:  # Threshold for image sharpness
+                            if blur_score < 90.0:
                                 print(f"  ✗ Discarded: Image too blurry (blur score: {blur_score:.1f} < 90.0).")
                                 os.remove(temp_path)
                                 continue
 
                     candidate_image = face_recognition.load_image_file(temp_path)
-                    candidate_encs = face_recognition.face_encodings(candidate_image)
+                    aligned_cand = align_face_img(candidate_image)
+                    candidate_encs = face_recognition.face_encodings(aligned_cand)
+                    if not candidate_encs:
+                        candidate_encs = face_recognition.face_encodings(candidate_image)
                     
                     if len(candidate_encs) == 1:
-                        # Compare to all our anchor templates
-                        # tolerance=0.48 is a strict distance threshold (standard is 0.60)
-                        # This ensures the face is mathematically identical or highly similar
+                        cand_vec = l2_norm(candidate_encs[0])
+                        distances = face_recognition.face_distance(anchor_encs, cand_vec)
+                        min_dist = min(distances) if len(distances) > 0 else 1.0
+                        if min_dist <= 0.05:
+                            final_path = os.path.join(member_dir, f"auto_{download_idx}{ext}")
+                            os.rename(temp_path, final_path)
+                            anchor_encs.append(cand_vec)
+                            success_count += 1
+                            download_idx += 1
+                            print(f"  ✓ Added match #{success_count}: {os.path.basename(final_path)} (distance: {min_dist:.3f})")
+                        else:
+                            os.remove(temp_path)
+                    else:
+                        os.remove(temp_path)
+                except Exception:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+        except Exception:
+            pass
                         matches = face_recognition.compare_faces(anchor_encs, candidate_encs[0], tolerance=0.48)
                         match_count = sum(matches)
                         

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,24 +8,27 @@
   <!-- Orbitron for sci-fi look, Inter for readability -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&family=Orbitron:wght@400;700;900&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <!-- Load local face-api.js browser bundle -->
   <script src="/js/face-api.js"></script>
 </head>
+
 <body>
-  
+
   <!-- Loading overlay -->
   <div id="loader-overlay" class="loader-overlay">
     <div class="loader-content">
       <div class="cyber-spinner"></div>
       <h1 class="glow-text">NCT 127 FACE ID</h1>
       <p class="status-msg" id="loader-status">Initializing neural network models...</p>
-      
+
       <div class="progress-container">
         <div id="progress-bar" class="progress-bar"></div>
       </div>
-      
+
       <div class="log-container" id="loader-logs">
         <div>[SYSTEM] Booting Face Recognition Module...</div>
       </div>
@@ -45,7 +49,7 @@
 
     <!-- Main Grid -->
     <main class="cyber-grid">
-      
+
       <!-- Left Column: Camera, controls and booster -->
       <div class="cyber-col">
         <section class="camera-panel cyber-card">
@@ -53,17 +57,17 @@
             <h2><span class="icon">📷</span> BIOMETRIC FEED</h2>
             <span class="tech-id">FEED_ID: 127_CAM</span>
           </div>
-          
+
           <div class="video-container">
             <video id="webcam" autoplay muted playsinline crossorigin="anonymous"></video>
             <canvas id="overlay-canvas"></canvas>
-            
+
             <div id="camera-placeholder" class="camera-placeholder">
               <div class="placeholder-icon">📷</div>
               <p>Webcam Stream Offline</p>
               <button id="btn-start-camera" class="cyber-btn primary-btn">ACTIVATE CAMERA</button>
             </div>
-            
+
             <div class="scanner-line"></div>
             <div class="corner-reticle top-left"></div>
             <div class="corner-reticle top-right"></div>
@@ -93,8 +97,10 @@
             <div class="control-group hidden" id="youtube-url-group">
               <label for="youtube-url-input">YouTube Video URL</label>
               <div class="youtube-input-wrapper">
-                <input type="text" id="youtube-url-input" class="cyber-input" placeholder="https://www.youtube.com/watch?v=...">
-                <button id="btn-load-youtube" class="cyber-btn primary-btn compact" style="width: auto; white-space: nowrap; margin-top: 0;">LOAD VIDEO</button>
+                <input type="text" id="youtube-url-input" class="cyber-input"
+                  placeholder="https://www.youtube.com/watch?v=...">
+                <button id="btn-load-youtube" class="cyber-btn primary-btn compact"
+                  style="width: auto; white-space: nowrap; margin-top: 0;">LOAD VIDEO</button>
               </div>
             </div>
 
@@ -112,23 +118,30 @@
                   <option value="jungwoo">Jungwoo (정우)</option>
                   <option value="haechan">Haechan (해찬)</option>
                 </select>
-                <button id="btn-toggle-harvest" class="cyber-btn secondary-btn compact red-btn">START HARVESTING</button>
+                <button id="btn-toggle-harvest" class="cyber-btn secondary-btn compact red-btn">START
+                  HARVESTING</button>
               </div>
               <div class="checkbox-wrapper" style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
-                <input type="checkbox" id="chk-force-target" class="cyber-checkbox" style="width: 16px; height: 16px; cursor: pointer;">
-                <label for="chk-force-target" style="font-size: 11px; font-family: 'Orbitron', monospace; cursor: pointer; color: var(--text-secondary); text-shadow: 0 0 5px rgba(255,255,255,0.1);">FORCE SINGLE TARGET MODE (1-PERSON FANCAM)</label>
+                <input type="checkbox" id="chk-force-target" class="cyber-checkbox"
+                  style="width: 16px; height: 16px; cursor: pointer;">
+                <label for="chk-force-target"
+                  style="font-size: 11px; font-family: 'Orbitron', monospace; cursor: pointer; color: var(--text-secondary); text-shadow: 0 0 5px rgba(255,255,255,0.1);">FORCE
+                  SINGLE TARGET MODE (1-PERSON FANCAM)</label>
               </div>
-              <small class="help-text">Automatically crop and save recognized faces from the video into their member folders.</small>
+              <small class="help-text">Automatically crop and save recognized faces from the video into their member
+                folders.</small>
             </div>
 
             <div class="control-group">
-              <label for="threshold-slider">Recognition Sensitivity (Strictness): <span id="threshold-val">0.42</span></label>
+              <label for="threshold-slider">Recognition Sensitivity (Strictness): <span
+                  id="threshold-val">0.05</span></label>
               <div class="slider-wrapper">
-                <span>Strict</span>
-                <input type="range" id="threshold-slider" min="0.30" max="0.75" step="0.05" value="0.42">
-                <span>Loose</span>
+                <span>Strict (99%)</span>
+                <input type="range" id="threshold-slider" min="0.01" max="0.25" step="0.01" value="0.05">
+                <span>Loose (75%)</span>
               </div>
-              <small class="help-text">Lower values make matches stricter (fewer false positives, but harder to match).</small>
+              <small class="help-text">Lower distance values make matches stricter (95%+ similarity required at
+                0.05).</small>
             </div>
 
             <div class="control-group">
@@ -154,20 +167,22 @@
           </div>
           <div class="booster-content">
             <p class="booster-desc">
-              Automatically scrape and verify additional high-quality fancam portrait images of members from Google Search against your templates to improve recognition.
+              Automatically scrape and verify additional high-quality fancam portrait images of members from Google
+              Search against your templates to improve recognition.
             </p>
             <div class="booster-action-row">
               <button id="btn-start-boost" class="cyber-btn primary-btn pulse-btn">START AUTO-EXPANSION</button>
             </div>
-            
+
             <div id="booster-status-container" class="booster-status-container hidden">
               <div class="booster-progress-bar-wrapper">
-                <div class="booster-progress-text">Expanding: <span id="boost-current-member">-</span> (<span id="boost-current-progress">0%</span>)</div>
+                <div class="booster-progress-text">Expanding: <span id="boost-current-member">-</span> (<span
+                    id="boost-current-progress">0%</span>)</div>
                 <div class="progress-container">
                   <div id="boost-progress-bar" class="progress-bar" style="width: 0%;"></div>
                 </div>
               </div>
-              
+
               <div class="booster-log-view" id="booster-logs">
                 <div class="log-line system">[SYSTEM] Ready to boost accuracy. Click start to begin.</div>
               </div>
@@ -199,7 +214,8 @@
                 <li>Set Network Address to <code>ws://localhost:5173</code>.</li>
                 <li>Set Active to <strong>On</strong>.</li>
               </ol>
-              <button id="btn-copy-td-script" class="cyber-btn secondary-btn compact">COPY TD PYTHON CALLBACK SCRIPT</button>
+              <button id="btn-copy-td-script" class="cyber-btn secondary-btn compact">COPY TD PYTHON CALLBACK
+                SCRIPT</button>
             </div>
           </div>
         </section>
@@ -211,7 +227,7 @@
           <h2><span class="icon">📂</span> REFERENCE DATABASE</h2>
           <span class="tech-id">REF_DB: NCT127_v1.0</span>
         </div>
-        
+
         <div class="catalog-summary">
           <div>TOTAL MEMBERS: <span id="db-member-count">10</span></div>
           <div>ACTIVE FACE DESCRIPTORS: <span id="db-descriptor-count">0</span></div>
@@ -233,4 +249,5 @@
 
   <script type="module" src="/main.js"></script>
 </body>
+
 </html>
