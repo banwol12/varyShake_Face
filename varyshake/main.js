@@ -526,7 +526,8 @@ function trackAndSmoothDetections(detections) {
   // Clean dead tracks
   faceTracks = faceTracks.filter(t => now - t.lastSeen < maxAge);
 
-  // Associate current detections to existing tracks
+  // Track assigned status to avoid duplicate associations
+  const assignedTrackIds = new Set();
   const trackedResults = [];
 
   detections.forEach(det => {
@@ -538,6 +539,7 @@ function trackAndSmoothDetections(detections) {
     let minD = Infinity;
 
     faceTracks.forEach(t => {
+      if (assignedTrackIds.has(t.id)) return;
       const prevCenter = { x: t.lastBox.x + t.lastBox.width / 2, y: t.lastBox.y + t.lastBox.height / 2 };
       const d = Math.hypot(center.x - prevCenter.x, center.y - prevCenter.y);
       if (d < minD && d < maxDistance) {
@@ -545,6 +547,9 @@ function trackAndSmoothDetections(detections) {
         bestTrack = t;
       }
     });
+
+    if (bestTrack) {
+      assignedTrackIds.add(bestTrack.id);
 
     // Use 512-D ArcFace Match if available, else Fallback to KNN
     let rawLabel = 'unknown';
@@ -734,37 +739,18 @@ async function runRecognitionLoop() {
 
       if (resizedDetections.length > 0) {
         // Query 512-D InsightFace ArcFace Engine for all detected faces in PARALLEL
-        // Also skip 512D for tracks that already have a stable identity (saves ~200ms/face)
-        const match512Promises = resizedDetections.map(det => {
-          const dBox = det.detection.box;
-          const dCenter = { x: dBox.x + dBox.width / 2, y: dBox.y + dBox.height / 2 };
-
-          // Check if this face belongs to an already-stably-identified track
-          for (const t of faceTracks) {
-            if (!t.smoothBox || (Date.now() - t.lastSeen > 800)) continue;
-            const tc = { x: t.smoothBox.x + t.smoothBox.width / 2, y: t.smoothBox.y + t.smoothBox.height / 2 };
-            if (Math.hypot(dCenter.x - tc.x, dCenter.y - tc.y) > 140) continue;
-            // Track matched — check voting stability
-            const votes = {};
-            t.history.forEach(lbl => { votes[lbl] = (votes[lbl] || 0) + 1; });
-            const maxV = Math.max(0, ...Object.values(votes));
-            const winner = Object.keys(votes).find(k => votes[k] === maxV);
-            if (winner && winner !== 'unknown' && maxV >= 3) {
-              return Promise.resolve(null); // Skip 512D — this track is already locked
-            }
-          }
-          return recognizeFace512D(webcam, dBox);
-        });
-
+        const match512Promises = resizedDetections.map(det => recognizeFace512D(webcam, det.detection.box));
         const match512Results = await Promise.all(match512Promises);
+
         resizedDetections.forEach((det, i) => {
           if (match512Results[i]) {
             det.match512 = match512Results[i];
           }
         });
         latestSmoothedResults = trackAndSmoothDetections(resizedDetections);
-      } else if (resizedDetections.length === 0) {
-        // Let tracks age out naturally via maxAge
+      } else {
+        // Clean up when no faces detected
+        latestSmoothedResults = trackAndSmoothDetections([]);
       }
 
       isAiDetectionRunning = false;
