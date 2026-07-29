@@ -131,9 +131,16 @@ app.get('/api/youtube-prepare', (req, res) => {
     return res.status(400).json({ error: 'YouTube URL is required.' });
   }
 
-  // Preprocess URL: Support watch, shorts, mobile, youtu.be, embed, etc.
-  let cleanUrl = url;
-  const videoIdMatch = url.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  // Preprocess URL: Remove any weird scheme (like pic://, file://) and ensure http/https
+  let targetUrlStr = (url || '').trim();
+  if (targetUrlStr.startsWith('pic://')) {
+    targetUrlStr = targetUrlStr.replace(/^pic:\/\//i, 'https://');
+  } else if (!targetUrlStr.startsWith('http://') && !targetUrlStr.startsWith('https://')) {
+    targetUrlStr = 'https://' + targetUrlStr;
+  }
+
+  let cleanUrl = targetUrlStr;
+  const videoIdMatch = targetUrlStr.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   if (videoIdMatch && videoIdMatch[1]) {
     cleanUrl = `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
   }

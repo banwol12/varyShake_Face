@@ -1152,10 +1152,17 @@ videoFileInput.addEventListener('change', (e) => {
 });
 
 btnLoadYoutube.addEventListener('click', async () => {
-  const url = youtubeUrlInput.value.trim();
+  let url = youtubeUrlInput.value.trim();
   if (!url) {
     alert("Please enter a YouTube video URL.");
     return;
+  }
+
+  // Sanitize scheme (fix pic:// or missing https://)
+  if (url.startsWith('pic://')) {
+    url = url.replace(/^pic:\/\//i, 'https://');
+  } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
   }
 
   // Extract video ID for clean naming
