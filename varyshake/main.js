@@ -485,54 +485,55 @@ function findKnnMatch(queryDescriptor, topK = 3) {
   return { label: bestLabel, distance: minKnnDist };
 }
 
-// High-Speed 512-D InsightFace ArcFace Recognition Client (with 800ms Strict Timeout)
-async function recognizeFace512D(videoEl, box) {
+// High-Speed 512-D InsightFace ArcFace Batch Recognition Client (Multi-Face Parallel)
+async function recognizeFaces512DBatch(videoEl, boxes) {
   try {
-    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return null;
+    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0 || !boxes || boxes.length === 0) return [];
 
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = 160;
-    cropCanvas.height = 160;
-    const cropCtx = cropCanvas.getContext('2d');
-
-    // Scale canvas box coordinates to raw video dimensions
     const scaleX = videoEl.videoWidth / (displaySize.width || videoEl.clientWidth || 1);
     const scaleY = videoEl.videoHeight / (displaySize.height || videoEl.clientHeight || 1);
 
-    const realX = box.x * scaleX;
-    const realY = box.y * scaleY;
-    const realW = box.width * scaleX;
-    const realH = box.height * scaleY;
+    const b64Images = boxes.map(box => {
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = 160;
+      cropCanvas.height = 160;
+      const cropCtx = cropCanvas.getContext('2d');
 
-    const padW = realW * 0.15;
-    const padH = realH * 0.15;
-    const sx = Math.max(0, realX - padW);
-    const sy = Math.max(0, realY - padH);
-    const sw = Math.min(videoEl.videoWidth - sx, realW + padW * 2);
-    const sh = Math.min(videoEl.videoHeight - sy, realH + padH * 2);
+      const realX = box.x * scaleX;
+      const realY = box.y * scaleY;
+      const realW = box.width * scaleX;
+      const realH = box.height * scaleY;
 
-    cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 160, 160);
-    const b64 = cropCanvas.toDataURL('image/jpeg', 0.85);
+      const padW = realW * 0.15;
+      const padH = realH * 0.15;
+      const sx = Math.max(0, realX - padW);
+      const sy = Math.max(0, realY - padH);
+      const sw = Math.min(videoEl.videoWidth - sx, realW + padW * 2);
+      const sh = Math.min(videoEl.videoHeight - sy, realH + padH * 2);
 
-    // 800ms Strict Timeout to prevent AI loop freezing on Python slowdown
+      cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 160, 160);
+      return cropCanvas.toDataURL('image/jpeg', 0.85);
+    });
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 800);
+    const timeoutId = setTimeout(() => controller.abort(), 2500); // Generous 2.5s timeout for batch
 
-    const resp = await fetch('/api/recognize-512d', {
+    const resp = await fetch('/api/recognize-512d-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64, topK: 3 }),
+      body: JSON.stringify({ images: b64Images, topK: 3 }),
       signal: controller.signal
     });
     clearTimeout(timeoutId);
 
     if (resp.ok) {
-      return await resp.json();
+      const data = await resp.json();
+      return data.results || [];
     }
   } catch (e) {
-    // Fallback to local 128D KNN matcher immediately if Python service lags or times out
+    // Exception fallback
   }
-  return null;
+  return [];
 }
 
 // 5. Temporal Webcam Voting & Tracking algorithm
@@ -767,12 +768,12 @@ async function runRecognitionLoop() {
       const resizedDetections = faceapi.resizeResults(detections, displaySize);
 
       if (resizedDetections.length > 0) {
-        // Query 512-D InsightFace ArcFace Engine for all detected faces in PARALLEL
-        const match512Promises = resizedDetections.map(det => recognizeFace512D(webcam, det.detection.box));
-        const match512Results = await Promise.all(match512Promises);
+        // High-Speed Batch 512-D Query for ALL detected faces in 1 single HTTP request
+        const boxes = resizedDetections.map(d => d.detection.box);
+        const match512Results = await recognizeFaces512DBatch(webcam, boxes);
 
         resizedDetections.forEach((det, i) => {
-          if (match512Results[i]) {
+          if (match512Results && match512Results[i]) {
             det.match512 = match512Results[i];
           }
         });

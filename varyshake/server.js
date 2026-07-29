@@ -616,10 +616,26 @@ app.post('/api/save-descriptors', (req, res) => {
   }
 });
 
-// Proxy endpoint for 512-D InsightFace ArcFace recognition
+// Proxy endpoint for 512-D InsightFace ArcFace recognition (Single)
 app.post('/api/recognize-512d', async (req, res) => {
   try {
     const pyResponse = await fetch('http://localhost:5001/recognize-512d', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    if (!pyResponse.ok) throw new Error(`Python service status ${pyResponse.status}`);
+    const data = await pyResponse.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Proxy endpoint for 512-D InsightFace ArcFace recognition (High-Speed Batch)
+app.post('/api/recognize-512d-batch', async (req, res) => {
+  try {
+    const pyResponse = await fetch('http://localhost:5001/recognize-512d-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)

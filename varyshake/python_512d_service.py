@@ -72,6 +72,53 @@ def load_descriptors():
 
 load_descriptors()
 
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=8)
+
+def process_single_face_image(image_b64, top_k=3):
+    try:
+        if ',' in image_b64:
+            image_b64 = image_b64.split(',')[1]
+
+        img_bytes = base64.b64decode(image_b64)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img_cv2 is None:
+            return {"matched": False, "label": "unknown", "distance": 1.0, "confidence": 0}
+
+        faces = insight_app.get(img_cv2)
+        if not faces:
+            return {"matched": False, "label": "unknown", "distance": 1.0, "confidence": 0}
+
+        target_face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
+        query_vec = target_face.normed_embedding if (hasattr(target_face, 'normed_embedding') and target_face.normed_embedding is not None) else l2_normalize(target_face.embedding)
+
+        best_label = "unknown"
+        min_dist = 1.0
+
+        for ld in labeled_descriptors:
+            label = ld["label"]
+            dists = [calc_cosine_distance(query_vec, ref_vec) for ref_vec in ld["descriptors"]]
+            dists.sort()
+            k = min(top_k, len(dists))
+            if k > 0:
+                avg_dist = sum(dists[:k]) / k
+                if avg_dist < min_dist:
+                    min_dist = avg_dist
+                    best_label = label
+
+        confidence = int(max(0, (1 - min_dist) * 100))
+        return {
+            "matched": True,
+            "label": best_label,
+            "distance": float(round(min_dist, 4)),
+            "confidence": confidence
+        }
+    except Exception as e:
+        return {"matched": False, "label": "unknown", "distance": 1.0, "confidence": 0, "error": str(e)}
+
 class ArcFaceServiceHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Suppress verbose HTTP request logging to keep console clean
@@ -98,79 +145,63 @@ class ArcFaceServiceHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "active", "engine": "InsightFace ArcFace 512-D"}).encode('utf-8'))
+        self.wfile.write(json.dumps({"status": "active", "engine": "InsightFace ArcFace 512-D Batch Engine"}).encode('utf-8'))
 
     def do_POST(self):
-        if self.path == '/recognize-512d':
+        if self.path == '/recognize-512d-batch':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            
+
             try:
                 data = json.loads(post_data.decode('utf-8'))
-                image_b64 = data.get('image', '')
+                images = data.get('images', [])
                 top_k = data.get('topK', 3)
-                
-                if ',' in image_b64:
-                    image_b64 = image_b64.split(',')[1]
 
-                img_bytes = base64.b64decode(image_b64)
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-                if img_cv2 is None:
-                    raise ValueError("Could not decode image")
-
-                # Extract 512-D vector using InsightFace ArcFace
-                faces = insight_app.get(img_cv2)
-                
-                if not faces:
-                    res = {"matched": False, "label": "unknown", "distance": 1.0, "confidence": 0}
-                else:
-                    target_face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
-                    query_vec = target_face.normed_embedding if (hasattr(target_face, 'normed_embedding') and target_face.normed_embedding is not None) else l2_normalize(target_face.embedding)
-
-                    # Top-K 512-D Cosine Distance Matcher
-                    best_label = "unknown"
-                    min_dist = 1.0
-
-                    for ld in labeled_descriptors:
-                        label = ld["label"]
-                        dists = [calc_cosine_distance(query_vec, ref_vec) for ref_vec in ld["descriptors"]]
-                        dists.sort()
-                        k = min(top_k, len(dists))
-                        if k > 0:
-                            avg_dist = sum(dists[:k]) / k
-                            if avg_dist < min_dist:
-                                min_dist = avg_dist
-                                best_label = label
-
-                    confidence = int(max(0, (1 - min_dist) * 100))
-                    res = {
-                        "matched": True,
-                        "label": best_label,
-                        "distance": float(min_dist),
-                        "confidence": confidence,
-                        "vectorDim": len(query_vec)
-                    }
+                futures = [executor.submit(process_single_face_image, img_b64, top_k) for img_b64 in images]
+                results = [f.result() for f in futures]
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps(res).encode('utf-8'))
-
+                self.wfile.write(json.dumps({"results": results}).encode('utf-8'))
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+            return
 
-def run(port=5001):
+        if self.path == '/recognize-512d':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+                image_b64 = data.get('image', '')
+                top_k = data.get('topK', 3)
+
+                res = process_single_face_image(image_b64, top_k)
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps(res).encode('utf-8'))
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+            return
+
+def run_server(port=5001):
     server_address = ('', port)
     httpd = HTTPServer(server_address, ArcFaceServiceHandler)
-    print(f"[OK] 512-D ArcFace Service running on http://localhost:{port}")
+    print(f"[OK] 512-D InsightFace ArcFace Batch Service running on http://localhost:{port}")
     httpd.serve_forever()
 
 if __name__ == "__main__":
-    run(5001)
+    run_server(5001)
