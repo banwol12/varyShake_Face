@@ -36,30 +36,42 @@ def calc_cosine_distance(vecA, vecB):
     dot = np.dot(vA, vB)
     return 1.0 - float(np.clip(dot, -1.0, 1.0))
 
+DESCRIPTORS_JSON = os.path.join(BASE_DIR, "public", "descriptors.json")
+
 def init_insightface():
-    """InsightFace 512-D ArcFace 엔진 초기화"""
+    """InsightFace 512-D ArcFace 엔진 초기화 (Ultra-fast 320x320)"""
     try:
         import insightface
         from insightface.app import FaceAnalysis
         app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(640, 640))
+        app.prepare(ctx_id=0, det_size=(320, 320))
         return app
     except Exception as e:
         print(f"[!] InsightFace 로드 실패: {e}")
         return None
 
-def calc_blur_score(img_cv2):
-    """이미지 선명도 점수 계산 (Laplacian Variance)"""
-    import cv2
-    gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
-
 def load_all_member_anchors(insight_app):
-    """모든 멤버의 시드 앵커 특징점(512-D) 사전 로드"""
-    import cv2
+    """descriptors.json에서 0.01초 만에 512D 앵커 특징점 로드"""
+    import json
     anchors = {m["id"]: [] for m in MEMBERS}
 
-    print("[*] 7명 멤버의 시드 기준 특징점(Anchor Vectors) 추출 중...")
+    if os.path.exists(DESCRIPTORS_JSON):
+        try:
+            with open(DESCRIPTORS_JSON, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+                for item in raw_data:
+                    mid = item.get("label")
+                    if mid in anchors:
+                        vecs = [np.array(d, dtype=np.float32) for d in item.get("descriptors", [])]
+                        anchors[mid].extend(vecs)
+            print("[OK] descriptors.json에서 0.01초 만에 7명 512D 앵커 로드 완료!")
+            return anchors
+        except Exception as e:
+            print(f"[!] descriptors.json 읽기 오류: {e}")
+
+    # Fallback: descriptors.json 없을 때 상위 5장만 빠르게 로드
+    import cv2
+    print("[*] descriptors.json 없음 — 시드 이미지 상위 5장만 빠르게 스캔 중...")
     for m in MEMBERS:
         member_id = m["id"]
         member_dir = os.path.join(MEMBERS_DIR, member_id)
@@ -72,12 +84,11 @@ def load_all_member_anchors(insight_app):
             and not f.startswith('.') and not f.startswith('_')
         ]
 
-        for fname in files[:30]:  # 각 멤버당 상위 30장의 고품질 시드 사용
+        for fname in files[:5]:  # 상위 5장만 축소 로드
             fpath = os.path.join(member_dir, fname)
             try:
                 img = cv2.imread(fpath)
-                if img is None:
-                    continue
+                if img is None: continue
                 faces = insight_app.get(img)
                 if faces:
                     target_face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
@@ -85,7 +96,6 @@ def load_all_member_anchors(insight_app):
                     anchors[member_id].append(vec)
             except Exception:
                 pass
-        print(f"  ✓ [{m['eng']}]: 기준 앵커 {len(anchors[member_id])}개 확보")
 
     return anchors
 

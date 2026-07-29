@@ -372,6 +372,10 @@ async function buildReferenceLibrary(forceRebuild = false) {
   }
 
   renderMemberCatalog(membersList, false);
+
+  setProgress(100, "Purification & Initialization Complete!");
+  logToLoader("System fully initialized. Ready for operations.", "success");
+  setTimeout(hideLoader, 600);
 }
 
 // 3. Render Database List on Right Panel
