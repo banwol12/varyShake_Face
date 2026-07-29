@@ -601,6 +601,37 @@ app.post('/api/trash-images', (req, res) => {
   res.json({ success: true, moved: movedCount, errors: errors.length });
 });
 
+// Endpoint for Smart 512D Purification, Non-face Deletion, _review Routing, and File Sorting
+app.post('/api/smart-cleanup-db', (req, res) => {
+  console.log('[SMART PURIFY] Starting 512-D ArcFace Database Purification & Serializer...');
+  const pythonCmd = getPythonCommand();
+  const cleanupProcess = spawn(pythonCmd, [path.join(__dirname, 'cleanup_database.py'), '--execute'], {
+    cwd: __dirname
+  });
+
+  let outputBuffer = '';
+  cleanupProcess.stdout.on('data', (data) => {
+    outputBuffer += data.toString();
+    console.log(`[SMART PURIFY] ${data.toString().trim()}`);
+  });
+
+  cleanupProcess.stderr.on('data', (data) => {
+    console.error(`[SMART PURIFY ERR] ${data.toString().trim()}`);
+  });
+
+  cleanupProcess.on('close', (code) => {
+    if (code === 0) {
+      console.log('[SMART PURIFY] Completed successfully.');
+      // Reload Python 512D Service descriptors
+      fetch('http://localhost:5001/reload').catch(() => {});
+      res.json({ success: true, message: 'Purification & sorting completed.' });
+    } else {
+      console.error(`[SMART PURIFY] Process exited with error code ${code}`);
+      res.status(500).json({ error: `Purification exited with code ${code}` });
+    }
+  });
+});
+
 // Endpoint to save pre-calculated face descriptors to descriptors.json
 app.post('/api/save-descriptors', (req, res) => {
   try {

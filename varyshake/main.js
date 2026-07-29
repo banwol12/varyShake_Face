@@ -200,13 +200,27 @@ async function buildReferenceLibrary(forceRebuild = false) {
         localStorage.removeItem('nct127_face_descriptors_v5');
       }
     }
-  } else {
-    logToLoader("Force Rebuild requested. Processing reference images from scratch...", "info");
+  }
+
+  if (forceRebuild) {
+    logToLoader("Starting 512-D ArcFace Smart Purification Pipeline...", "info");
+    setProgress(35, "Running 512-D Smart Purification & File Serializer...");
+
+    try {
+      const purifyResp = await fetch('/api/smart-cleanup-db', { method: 'POST' });
+      if (purifyResp.ok) {
+        logToLoader("✓ Smart Purification Completed: Non-face images deleted, cross-member faces moved to _trash, ambiguous to _review, files sequentially ordered!", "success");
+      } else {
+        logToLoader("Purification warning: Falling back to local loader.", "warning");
+      }
+    } catch (e) {
+      logToLoader(`Purification call warning: ${e.message}`, "warning");
+    }
   }
 
   // Scratch training
-  setProgress(40, "Scanning reference image database...");
-  logToLoader("Scanning local folders for NCT 127 photos...");
+  setProgress(50, "Loading purified reference image database...");
+  logToLoader("Loading purified database for NCT 127...");
 
   let membersList = [];
   try {
