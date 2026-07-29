@@ -485,7 +485,7 @@ function findKnnMatch(queryDescriptor, topK = 3) {
   return { label: bestLabel, distance: minKnnDist };
 }
 
-// High-Speed 512-D InsightFace ArcFace Recognition Client
+// High-Speed 512-D InsightFace ArcFace Recognition Client (with 800ms Strict Timeout)
 async function recognizeFace512D(videoEl, box) {
   try {
     if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return null;
@@ -514,16 +514,23 @@ async function recognizeFace512D(videoEl, box) {
     cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 160, 160);
     const b64 = cropCanvas.toDataURL('image/jpeg', 0.85);
 
+    // 800ms Strict Timeout to prevent AI loop freezing on Python slowdown
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 800);
+
     const resp = await fetch('/api/recognize-512d', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64, topK: 3 })
+      body: JSON.stringify({ image: b64, topK: 3 }),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
+
     if (resp.ok) {
       return await resp.json();
     }
   } catch (e) {
-    // Fallback to local matcher if Python service unreachable
+    // Fallback to local 128D KNN matcher immediately if Python service lags or times out
   }
   return null;
 }
@@ -722,16 +729,26 @@ async function runRecognitionLoop() {
 
   const ctx = canvas.getContext('2d');
 
+  let lastDetectionStartTime = 0;
+
   // === AI Detection Loop (runs as fast as the model allows, ~15-30fps) ===
   async function aiDetectionLoop() {
     if (!isCameraActive) return;
 
     try {
+      const now = Date.now();
+      // Watchdog: If lock has been held for over 1500ms, force reset it to prevent freezing
       if (isAiDetectionRunning) {
-        setTimeout(aiDetectionLoop, 16);
-        return;
+        if (now - lastDetectionStartTime > 1500) {
+          console.warn("[WATCHDOG] AI detection loop was stuck, force resetting lock!");
+          isAiDetectionRunning = false;
+        } else {
+          setTimeout(aiDetectionLoop, 16);
+          return;
+        }
       }
       isAiDetectionRunning = true;
+      lastDetectionStartTime = now;
 
       let detections = [];
 
