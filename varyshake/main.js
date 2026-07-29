@@ -621,7 +621,8 @@ function trackAndSmoothDetections(detections) {
         detection: { ...det.detection, box: bestTrack.smoothBox },
         descriptor: det.descriptor,
         label: finalLabel,
-        distance: distance
+        distance: distance,
+        match512: det.match512
       });
     } else {
       // Create a brand new track with smooth initial state
@@ -641,7 +642,8 @@ function trackAndSmoothDetections(detections) {
         detection: { ...det.detection, box: initBox },
         descriptor: det.descriptor,
         label: resolvedLabel, // use instant label on first frame
-        distance: distance
+        distance: distance,
+        match512: det.match512
       });
     }
   });
@@ -915,13 +917,15 @@ async function runRecognitionLoop() {
 
           if (isForceHarvest) {
             // FORCE SINGLE TARGET MODE: Verify that the detected face actually matches the target member!
-            // Calculate distance to the chosen target member's anchor vectors
             let isTrueMatch = false;
             let targetDist = 1.0;
 
-            if (det.match512 && det.match512.matched && det.match512.label === harvestTarget) {
+            if (result.match512 && result.match512.matched && result.match512.label === harvestTarget) {
               isTrueMatch = true;
-              targetDist = det.match512.distance;
+              targetDist = result.match512.distance;
+            } else if (result.label === harvestTarget) {
+              isTrueMatch = true;
+              targetDist = result.distance;
             } else {
               // Fallback check against descriptor matcher
               const bestMatch = findKnnMatch(result.descriptor, 3);
