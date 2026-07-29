@@ -11,20 +11,7 @@ except ImportError:
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMBERS_DIR = os.path.join(BASE_DIR, "public", "members")
-OUTPUT_JSON = os.path.join(BASE_DIR, "public", "descriptors.json")
-MEMBERS_JSON = os.path.join(BASE_DIR, "public", "members.json")
-
-MEMBERS = [
-    {"id": "johnny", "eng": "Johnny", "kor": "쟈니"},
-    {"id": "taeyong", "eng": "Taeyong", "kor": "태용"},
-    {"id": "yuta", "eng": "Yuta", "kor": "유타"},
-    {"id": "doyoung", "eng": "Doyoung", "kor": "도영"},
-    {"id": "jaehyun", "eng": "Jaehyun", "kor": "재현"},
-    {"id": "jungwoo", "eng": "Jungwoo", "kor": "정우"},
-    {"id": "haechan", "eng": "Haechan", "kor": "해찬"}
-]
+from members_config import MEMBERS, MEMBERS_DIR, DESCRIPTORS_JSON as OUTPUT_JSON, MEMBERS_JSON, BASE_DIR
 
 def check_dependencies():
     try:
@@ -99,8 +86,6 @@ def align_face(rgb_img, face_landmarks=None):
     right_eye_center = right_eye_pts.mean(axis=0)
 
     dY = right_eye_center[1] - left_eye_center[1]
-    dX = right_eye_center[2] - left_eye_center[0] if len(right_eye_center) > 1 and len(left_eye_center) > 0 else (right_eye_center[0] - left_eye_center[0])
-    
     dX = right_eye_center[0] - left_eye_center[0]
     angle = np.degrees(np.arctan2(dY, dX))
 

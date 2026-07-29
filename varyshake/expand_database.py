@@ -185,31 +185,6 @@ def download_and_verify_candidates(member, anchor_encs, max_additions=15):
                         os.remove(temp_path)
         except Exception:
             pass
-                        matches = face_recognition.compare_faces(anchor_encs, candidate_encs[0], tolerance=0.48)
-                        match_count = sum(matches)
-                        
-                        # We require at least 30% of the manual templates to match
-                        min_matches_required = max(1, int(len(anchor_encs) * 0.3))
-                        
-                        if match_count >= min_matches_required:
-                            final_path = os.path.join(member_dir, f"auto_{download_idx}{ext}")
-                            os.rename(temp_path, final_path)
-                            print(f"  ✓ VERIFIED! Saved auto_{download_idx}{ext} (matched {match_count}/{len(anchor_encs)} templates)")
-                            success_count += 1
-                            download_idx += 1
-                            time.sleep(0.35)
-                        else:
-                            print(f"  ✗ Discarded: Face similarity below strict matching requirements ({match_count}/{len(anchor_encs)} matched).")
-                            os.remove(temp_path)
-                    else:
-                        print(f"  ✗ Discarded: Image contains {len(candidate_encs)} faces (must be exactly 1 face).")
-                        os.remove(temp_path)
-                except Exception as e_analysis:
-                    # Clean up temp file on analysis failure
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-        except Exception as e:
-            pass
             
     print(f"Finished. Added {success_count} verified images for {eng_name}.")
 

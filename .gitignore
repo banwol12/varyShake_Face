@@ -1,9 +1,38 @@
+# Dependencies
 node_modules/
 dist/
+
+# macOS metadata
 .DS_Store
 __MACOSX/
+
+# Python cache
+*.pyc
+__pycache__/
+
+# Large media files
 *.part
 *.mp4
 *.webm
 *.webm.*
+*.avi
+*.mkv
+
+# YouTube temp downloads
 varyshake/public/youtube_temp.*
+
+# Auto-generated data files
+varyshake/public/descriptors.json
+varyshake/public/saved_urls.json
+
+# Downloaded reference images (too large for git)
+varyshake/public/members/
+
+# Downloaded ML models
+varyshake/public/models/
+
+# Debug / test HTML files
+varyshake/google_*.html
+
+# Duplicate player scripts (auto-generated, ~2.5MB each)
+varyshake/1783993276*.js

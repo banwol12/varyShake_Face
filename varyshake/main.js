@@ -24,7 +24,7 @@ const MEMBER_THRESHOLDS = {
 let faceMatcher = null;
 let faceMatcherNoLimit = null;
 let activeDetector = 'ssd';
-let matchThreshold = 0.42; // 512D ArcFace cutoffsimilarity confidence cutoff (concert-optimized)
+let matchThreshold = 0.42; // 512D ArcFace cosine distance cutoff (concert-optimized)
 let stream = null;
 
 // TouchDesigner integration state
@@ -228,6 +228,7 @@ async function buildReferenceLibrary(forceRebuild = false) {
 
   const totalSteps = membersList.length;
   let successDescriptorsCount = 0;
+  const discardedImages = []; // Collect filtered-out images to move to _trash
 
   for (let idx = 0; idx < membersList.length; idx++) {
     const member = membersList[idx];
@@ -262,17 +263,25 @@ async function buildReferenceLibrary(forceRebuild = false) {
             databaseStats[memberId].kept++;
           } else {
             databaseStats[memberId].discarded++;
-            logToLoader(`  ✗ Discarded ${imgUrl.split('/').pop()}: Detection confidence too low (${Math.round(score * 100)}%)`);
+            const fname = imgUrl.split('/').pop();
+            discardedImages.push({ memberId, filename: fname, reason: `Detection confidence too low (${Math.round(score * 100)}%)` });
+            logToLoader(`  ✗ Discarded ${fname}: Detection confidence too low (${Math.round(score * 100)}%)`);
           }
         } else if (detections.length > 1) {
           databaseStats[memberId].discarded++;
-          logToLoader(`  ✗ Discarded ${imgUrl.split('/').pop()}: Group photo detected (${detections.length} faces)`, "error");
+          const fname = imgUrl.split('/').pop();
+          discardedImages.push({ memberId, filename: fname, reason: `Group photo (${detections.length} faces)` });
+          logToLoader(`  ✗ Discarded ${fname}: Group photo detected (${detections.length} faces)`, "error");
         } else {
           databaseStats[memberId].discarded++;
-          logToLoader(`  ✗ Discarded ${imgUrl.split('/').pop()}: No face detected`, "error");
+          const fname = imgUrl.split('/').pop();
+          discardedImages.push({ memberId, filename: fname, reason: 'No face detected' });
+          logToLoader(`  ✗ Discarded ${fname}: No face detected`, "error");
         }
       } catch (err) {
         databaseStats[memberId].discarded++;
+        const fname = imgUrl.split('/').pop();
+        discardedImages.push({ memberId, filename: fname, reason: `Load error: ${err.message}` });
       }
     }
 
@@ -282,6 +291,33 @@ async function buildReferenceLibrary(forceRebuild = false) {
       logToLoader(`✓ Completed: Kept ${descriptors.length}/${member.images.length} images for ${engName}.`, "success");
     } else {
       logToLoader(`⚠️ Warning: No valid face descriptors found for ${engName}!`, "error");
+    }
+  }
+
+  // Move discarded images to _trash folders on the server
+  if (discardedImages.length > 0) {
+    setProgress(90, `Moving ${discardedImages.length} discarded images to trash...`);
+    logToLoader(`Moving ${discardedImages.length} discarded images to _trash folders...`);
+    try {
+      const trashResp = await fetch('/api/trash-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: discardedImages })
+      });
+      if (trashResp.ok) {
+        const trashData = await trashResp.json();
+        logToLoader(`✓ Moved ${trashData.moved} images to _trash folders. (${trashData.errors} errors)`, "success");
+      }
+    } catch (e) {
+      logToLoader(`Failed to move discarded images: ${e.message}`, "error");
+    }
+
+    // Regenerate members.json so trashed images are excluded from future loads
+    try {
+      await fetch('/api/regenerate-db', { method: 'POST' });
+      logToLoader("✓ members.json regenerated (trashed images excluded).", "success");
+    } catch (e) {
+      logToLoader("Failed to regenerate members.json after trashing.", "error");
     }
   }
 
@@ -485,7 +521,7 @@ async function recognizeFace512D(videoEl, box) {
 function trackAndSmoothDetections(detections) {
   const now = Date.now();
   const maxDistance = 140; // max pixel distance to associate boxes between frames
-  const maxAge = 1200; // time in ms to keep dead tracks
+  const maxAge = 800; // time in ms to keep dead tracks (reduced for faster cleanup)
 
   // Clean dead tracks
   faceTracks = faceTracks.filter(t => now - t.lastSeen < maxAge);
@@ -531,22 +567,14 @@ function trackAndSmoothDetections(detections) {
       bestTrack.lastSeen = now;
       bestTrack.targetBox = { x: box.x, y: box.y, width: box.width, height: box.height };
 
-      // 60FPS Lerp Interpolation for silky smooth tracking
-      const alpha = 0.35;
+      // Only set targetBox here — the 60fps renderLoop handles all smoothing
       if (!bestTrack.smoothBox) {
         bestTrack.smoothBox = { ...bestTrack.targetBox };
-      } else {
-        bestTrack.smoothBox = {
-          x: bestTrack.smoothBox.x + (box.x - bestTrack.smoothBox.x) * alpha,
-          y: bestTrack.smoothBox.y + (box.y - bestTrack.smoothBox.y) * alpha,
-          width: bestTrack.smoothBox.width + (box.width - bestTrack.smoothBox.width) * alpha,
-          height: bestTrack.smoothBox.height + (box.height - bestTrack.smoothBox.height) * alpha
-        };
       }
       bestTrack.lastBox = bestTrack.smoothBox;
 
       bestTrack.history.push(resolvedLabel);
-      if (bestTrack.history.length > 15) bestTrack.history.shift(); // Keep last 15 frames for better smoothing
+      if (bestTrack.history.length > 8) bestTrack.history.shift(); // Keep last 8 frames for faster identity lock
 
       // Calculate majority vote winner
       const votes = {};
@@ -561,8 +589,8 @@ function trackAndSmoothDetections(detections) {
         }
       }
 
-      // Require stability: majority of history, up to 5 votes
-      const finalLabel = maxVotes >= Math.min(5, bestTrack.history.length) ? winnerLabel : 'unknown';
+      // Require stability: majority of recent history, minimum 3 votes for faster lock-on
+      const finalLabel = maxVotes >= Math.min(3, bestTrack.history.length) ? winnerLabel : 'unknown';
 
       trackedResults.push({
         detection: { ...det.detection, box: bestTrack.smoothBox },
@@ -705,13 +733,35 @@ async function runRecognitionLoop() {
       const resizedDetections = faceapi.resizeResults(detections, displaySize);
 
       if (resizedDetections.length > 0) {
-        // Query 512-D InsightFace ArcFace Engine for detected faces
-        for (let det of resizedDetections) {
-          const match512 = await recognizeFace512D(webcam, det.detection.box);
-          if (match512) {
-            det.match512 = match512;
+        // Query 512-D InsightFace ArcFace Engine for all detected faces in PARALLEL
+        // Also skip 512D for tracks that already have a stable identity (saves ~200ms/face)
+        const match512Promises = resizedDetections.map(det => {
+          const dBox = det.detection.box;
+          const dCenter = { x: dBox.x + dBox.width / 2, y: dBox.y + dBox.height / 2 };
+
+          // Check if this face belongs to an already-stably-identified track
+          for (const t of faceTracks) {
+            if (!t.smoothBox || (Date.now() - t.lastSeen > 800)) continue;
+            const tc = { x: t.smoothBox.x + t.smoothBox.width / 2, y: t.smoothBox.y + t.smoothBox.height / 2 };
+            if (Math.hypot(dCenter.x - tc.x, dCenter.y - tc.y) > 140) continue;
+            // Track matched — check voting stability
+            const votes = {};
+            t.history.forEach(lbl => { votes[lbl] = (votes[lbl] || 0) + 1; });
+            const maxV = Math.max(0, ...Object.values(votes));
+            const winner = Object.keys(votes).find(k => votes[k] === maxV);
+            if (winner && winner !== 'unknown' && maxV >= 3) {
+              return Promise.resolve(null); // Skip 512D — this track is already locked
+            }
           }
-        }
+          return recognizeFace512D(webcam, dBox);
+        });
+
+        const match512Results = await Promise.all(match512Promises);
+        resizedDetections.forEach((det, i) => {
+          if (match512Results[i]) {
+            det.match512 = match512Results[i];
+          }
+        });
         latestSmoothedResults = trackAndSmoothDetections(resizedDetections);
       } else if (resizedDetections.length === 0) {
         // Let tracks age out naturally via maxAge
@@ -737,10 +787,10 @@ async function runRecognitionLoop() {
 
     // Interpolate all active tracks toward their target positions for buttery smooth rendering
     const now = Date.now();
-    const lerpAlpha = 0.30;
+    const lerpAlpha = 0.45; // Increased for snappier box tracking (was 0.30)
 
     faceTracks.forEach(track => {
-      if (now - track.lastSeen > 1200) return; // Skip dead tracks
+      if (now - track.lastSeen > 800) return; // Skip dead tracks (reduced from 1200ms)
       if (!track.smoothBox || !track.targetBox) return;
 
       // Lerp smooth box toward target box each render frame

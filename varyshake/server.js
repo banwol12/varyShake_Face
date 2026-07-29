@@ -45,7 +45,7 @@ function addSavedUrl(url) {
   }
 }
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Serve static assets from public/ folder at the root level (e.g. /models/ -> public/models/)
 app.use(express.static(path.join(__dirname, 'public')));
@@ -62,6 +62,28 @@ app.get('/api/proxy-image', async (req, res) => {
   const { url } = req.query;
   if (!url) {
     return res.status(400).send('URL is required.');
+  }
+
+  // SSRF Protection: Block requests to private/internal network addresses
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const blockedPatterns = [
+      /^localhost$/i,
+      /^127\./,
+      /^10\./,
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+      /^192\.168\./,
+      /^0\./,
+      /^\[::1\]$/,
+      /^\[fc/i,
+      /^\[fd/i,
+    ];
+    if (blockedPatterns.some(p => p.test(hostname))) {
+      return res.status(403).send('Access to internal network addresses is not allowed.');
+    }
+  } catch (e) {
+    return res.status(400).send('Invalid URL.');
   }
 
   let targetUrl = url;
@@ -99,7 +121,6 @@ app.get('/api/proxy-image', async (req, res) => {
   }
 });
 
-// Global map to track active downloads to prevent duplicate spawns for the same URL
 // Global map to track active downloads to prevent duplicate spawns for the same URL
 const activeDownloads = new Map();
 
@@ -493,8 +514,8 @@ app.post('/api/regenerate-db', (req, res) => {
       if (!fs.statSync(folderPath).isDirectory()) continue;
 
       const files = fs.readdirSync(folderPath)
-        .filter(f => f.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/))
-        .sort(); // Sort files alphabetically
+        .filter(f => !f.startsWith('_') && !f.startsWith('.') && f.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/))
+        .sort(); // Sort files alphabetically, excluding _trash/ contents
 
       if (files.length > 0) {
         const names = {
@@ -531,6 +552,70 @@ app.post('/api/regenerate-db', (req, res) => {
   }
 });
 
+// Endpoint to batch-move discarded images into _trash folders during DB rebuild
+app.post('/api/trash-images', (req, res) => {
+  const { images } = req.body; // Array of { memberId, filename, reason }
+  if (!images || !Array.isArray(images) || images.length === 0) {
+    return res.json({ success: true, moved: 0, errors: 0 });
+  }
+
+  let movedCount = 0;
+  const errors = [];
+
+  for (const item of images) {
+    const { memberId, filename } = item;
+    if (!memberId || !filename) continue;
+
+    // Security: prevent path traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) continue;
+
+    const memberDir = path.join(__dirname, 'public', 'members', memberId);
+    const trashDir = path.join(memberDir, '_trash');
+    const srcPath = path.join(memberDir, filename);
+    const destPath = path.join(trashDir, filename);
+
+    try {
+      if (!fs.existsSync(srcPath)) continue;
+      if (!fs.existsSync(trashDir)) {
+        fs.mkdirSync(trashDir, { recursive: true });
+      }
+      fs.renameSync(srcPath, destPath);
+      movedCount++;
+    } catch (err) {
+      errors.push(`${memberId}/${filename}: ${err.message}`);
+    }
+  }
+
+  console.log(`[TRASH] Moved ${movedCount}/${images.length} discarded images to _trash folders.`);
+  if (errors.length > 0) {
+    console.warn(`[TRASH] ${errors.length} move errors:`, errors.slice(0, 5));
+  }
+
+  res.json({ success: true, moved: movedCount, errors: errors.length });
+});
+
+// Endpoint to save pre-calculated face descriptors to descriptors.json
+app.post('/api/save-descriptors', (req, res) => {
+  try {
+    const { descriptors } = req.body;
+    if (!descriptors) {
+      return res.status(400).json({ error: 'Missing descriptors data.' });
+    }
+
+    const descriptorsPath = path.join(__dirname, 'public', 'descriptors.json');
+    fs.writeFileSync(descriptorsPath, JSON.stringify(descriptors), 'utf-8');
+    console.log(`[DB] Saved ${descriptors.length} member descriptors to descriptors.json`);
+
+    // Notify Python 512D Service to reload descriptors
+    fetch('http://localhost:5001/reload').catch(() => {});
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error saving descriptors:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Proxy endpoint for 512-D InsightFace ArcFace recognition
 app.post('/api/recognize-512d', async (req, res) => {
   try {
@@ -547,16 +632,50 @@ app.post('/api/recognize-512d', async (req, res) => {
   }
 });
 
+// Cross-platform Python executable detection
+function getPythonCommand() {
+  if (os.platform() === 'win32') {
+    return 'python';
+  }
+  // On macOS/Linux, prefer python3
+  try {
+    const result = require('child_process').execSync('which python3', { stdio: 'pipe' });
+    if (result) return 'python3';
+  } catch (e) {}
+  return 'python';
+}
+
 let py512Process = null;
 function startPython512DService() {
-  console.log('[*] Spawning 512-D InsightFace ArcFace Python Service...');
-  py512Process = spawn('python', [path.join(__dirname, 'python_512d_service.py')], {
+  const pythonCmd = getPythonCommand();
+  console.log(`[*] Spawning 512-D InsightFace ArcFace Python Service (using ${pythonCmd})...`);
+  py512Process = spawn(pythonCmd, [path.join(__dirname, 'python_512d_service.py')], {
     stdio: 'inherit',
     cwd: __dirname
   });
   py512Process.on('error', (err) => {
     console.error('[!] Python 512D Service error:', err.message);
   });
+
+  // Health check: wait for Python service to become ready
+  let healthCheckAttempts = 0;
+  const maxAttempts = 10;
+  const healthCheck = setInterval(async () => {
+    healthCheckAttempts++;
+    try {
+      const resp = await fetch('http://localhost:5001/');
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log(`[OK] Python 512D Service health check passed: ${data.engine || 'active'}`);
+        clearInterval(healthCheck);
+      }
+    } catch (e) {
+      if (healthCheckAttempts >= maxAttempts) {
+        console.warn('[!] Python 512D Service did not respond after 10 attempts. Face recognition may use browser fallback.');
+        clearInterval(healthCheck);
+      }
+    }
+  }, 2000);
 }
 
 const server = app.listen(PORT, () => {

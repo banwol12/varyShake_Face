@@ -8,18 +8,7 @@ import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-MEMBERS = [
-    {"id": "johnny", "eng": "Johnny", "kor": "쟈니"},
-    {"id": "taeyong", "eng": "Taeyong", "kor": "태용"},
-    {"id": "yuta", "eng": "Yuta", "kor": "유타"},
-    {"id": "doyoung", "eng": "Doyoung", "kor": "도영"},
-    {"id": "jaehyun", "eng": "Jaehyun", "kor": "재현"},
-    {"id": "jungwoo", "eng": "Jungwoo", "kor": "정우"},
-    {"id": "haechan", "eng": "Haechan", "kor": "해찬"}
-]
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMBERS_DIR = os.path.join(BASE_DIR, "public", "members")
+from members_config import MEMBERS, MEMBERS_DIR, BASE_DIR
 
 def check_dependencies():
     missing = []
