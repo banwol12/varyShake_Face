@@ -375,7 +375,9 @@ async function buildReferenceLibrary(forceRebuild = false) {
 
   setProgress(100, "Purification & Initialization Complete!");
   logToLoader("System fully initialized. Ready for operations.", "success");
-  setTimeout(hideLoader, 600);
+  setTimeout(() => {
+    loaderOverlay.classList.add('fade-out');
+  }, 600);
 }
 
 // 3. Render Database List on Right Panel
