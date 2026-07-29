@@ -488,17 +488,28 @@ function findKnnMatch(queryDescriptor, topK = 3) {
 // High-Speed 512-D InsightFace ArcFace Recognition Client
 async function recognizeFace512D(videoEl, box) {
   try {
+    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return null;
+
     const cropCanvas = document.createElement('canvas');
     cropCanvas.width = 160;
     cropCanvas.height = 160;
     const cropCtx = cropCanvas.getContext('2d');
 
-    const padW = box.width * 0.15;
-    const padH = box.height * 0.15;
-    const sx = Math.max(0, box.x - padW);
-    const sy = Math.max(0, box.y - padH);
-    const sw = Math.min(videoEl.videoWidth - sx, box.width + padW * 2);
-    const sh = Math.min(videoEl.videoHeight - sy, box.height + padH * 2);
+    // Scale canvas box coordinates to raw video dimensions
+    const scaleX = videoEl.videoWidth / (displaySize.width || videoEl.clientWidth || 1);
+    const scaleY = videoEl.videoHeight / (displaySize.height || videoEl.clientHeight || 1);
+
+    const realX = box.x * scaleX;
+    const realY = box.y * scaleY;
+    const realW = box.width * scaleX;
+    const realH = box.height * scaleY;
+
+    const padW = realW * 0.15;
+    const padH = realH * 0.15;
+    const sx = Math.max(0, realX - padW);
+    const sy = Math.max(0, realY - padH);
+    const sw = Math.min(videoEl.videoWidth - sx, realW + padW * 2);
+    const sh = Math.min(videoEl.videoHeight - sy, realH + padH * 2);
 
     cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 160, 160);
     const b64 = cropCanvas.toDataURL('image/jpeg', 0.85);
@@ -526,7 +537,8 @@ function trackAndSmoothDetections(detections) {
   // Clean dead tracks
   faceTracks = faceTracks.filter(t => now - t.lastSeen < maxAge);
 
-  // Associate current detections to existing tracks
+  // Associate current detections to existing tracks (prevent duplicate track assignment)
+  const assignedTrackIds = new Set();
   const trackedResults = [];
 
   detections.forEach(det => {
@@ -538,6 +550,7 @@ function trackAndSmoothDetections(detections) {
     let minD = Infinity;
 
     faceTracks.forEach(t => {
+      if (assignedTrackIds.has(t.id)) return; // Skip already assigned tracks
       const prevCenter = { x: t.lastBox.x + t.lastBox.width / 2, y: t.lastBox.y + t.lastBox.height / 2 };
       const d = Math.hypot(center.x - prevCenter.x, center.y - prevCenter.y);
       if (d < minD && d < maxDistance) {
@@ -545,6 +558,10 @@ function trackAndSmoothDetections(detections) {
         bestTrack = t;
       }
     });
+
+    if (bestTrack) {
+      assignedTrackIds.add(bestTrack.id);
+    }
 
     // Use 512-D ArcFace Match if available, else Fallback to KNN
     let rawLabel = 'unknown';
