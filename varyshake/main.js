@@ -889,43 +889,53 @@ async function runRecognitionLoop() {
           highlightCatalogMember(label);
         }
 
-        // Real-time Video Face Harvesting
+        // Real-time Video Face Harvesting (STRICT BACKDANCER SHIELD)
         if (isHarvestingActive) {
           const harvestNow = Date.now();
           const harvestTarget = harvestTargetSelect.value;
           const isForceHarvest = chkForceTarget && chkForceTarget.checked && harvestTarget !== 'all';
 
           if (isForceHarvest) {
-            const lastHarvest = lastHarvestTimes[harvestTarget] || 0;
-            const cooldown = 2000;
-            if (harvestNow - lastHarvest > cooldown) {
-              lastHarvestTimes[harvestTarget] = harvestNow;
-              logToLoader(`[HARVEST] Force Harvesting face for ${harvestTarget.toUpperCase()} (1-Person Mode)...`, "info");
-              harvestFace(harvestTarget, renderBox, 0, result.descriptor);
+            // FORCE SINGLE TARGET MODE: Verify that the detected face actually matches the target member!
+            // Calculate distance to the chosen target member's anchor vectors
+            let isTrueMatch = false;
+            let targetDist = 1.0;
+
+            if (det.match512 && det.match512.matched && det.match512.label === harvestTarget) {
+              isTrueMatch = true;
+              targetDist = det.match512.distance;
+            } else {
+              // Fallback check against descriptor matcher
+              const bestMatch = findKnnMatch(result.descriptor, 3);
+              if (bestMatch.label === harvestTarget && bestMatch.distance <= 0.38) {
+                isTrueMatch = true;
+                targetDist = bestMatch.distance;
+              }
+            }
+
+            if (isTrueMatch && targetDist <= 0.38) {
+              const lastHarvest = lastHarvestTimes[harvestTarget] || 0;
+              const cooldown = 2000;
+              if (harvestNow - lastHarvest > cooldown) {
+                lastHarvestTimes[harvestTarget] = harvestNow;
+                logToLoader(`[HARVEST] Verified face for ${harvestTarget.toUpperCase()} saved. (dist: ${targetDist.toFixed(3)})`, "success");
+                harvestFace(harvestTarget, renderBox, targetDist, result.descriptor);
+              }
+            } else {
+              // Ignore background dancers/non-target people in 1-person mode
             }
           } else {
-            let targetLabel = label;
-            let targetDistance = distance;
-            if (isUnknown) {
-              const closest = faceMatcherNoLimit.findBestMatch(result.descriptor);
-              targetLabel = closest.label;
-              targetDistance = closest.distance;
-            }
-            if (targetLabel && targetLabel !== 'unknown') {
-              const lastHarvest = lastHarvestTimes[targetLabel] || 0;
+            // MULTI-MEMBER MODE: Only harvest if identity is VERIFIED (NEVER harvest unknown/backdancers)
+            if (!isUnknown && label && label !== 'unknown') {
+              const lastHarvest = lastHarvestTimes[label] || 0;
               const cooldown = 2000;
-              const isTarget = (harvestTarget === 'all' || harvestTarget === targetLabel);
-              const harvestThreshold = isUnknown ? (matchThreshold * 1.05) : (matchThreshold * 0.9);
-              const isPassingCriteria = (targetDistance <= harvestThreshold);
+              const isTarget = (harvestTarget === 'all' || harvestTarget === label);
+              const isPassingCriteria = (distance <= 0.35); // Strict threshold for auto-saving
+
               if (isTarget && (harvestNow - lastHarvest > cooldown)) {
                 if (isPassingCriteria) {
-                  lastHarvestTimes[targetLabel] = harvestNow;
-                  harvestFace(targetLabel, renderBox, targetDistance, result.descriptor);
-                } else {
-                  lastHarvestTimes[targetLabel] = harvestNow;
-                  const similarity = Math.round((1 - targetDistance) * 100);
-                  const reqPercent = Math.round((1 - harvestThreshold) * 100);
-                  logToLoader(`[HARVEST] Skipped ${targetLabel.toUpperCase()}${isUnknown ? ' (NEW ANGLE)' : ''}: Similarity (${similarity}%) below harvest requirement (${reqPercent}%).`, "info");
+                  lastHarvestTimes[label] = harvestNow;
+                  harvestFace(label, renderBox, distance, result.descriptor);
                 }
               }
             }
